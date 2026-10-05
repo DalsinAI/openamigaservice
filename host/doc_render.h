@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#define DR_PROBE  1   /* buf0 file, extra[0..1] largest page size -> buf1 info (24 bytes); result pages */
+#define DR_PROBE  1   /* buf0 file, extra[0..1] largest page size, extra[2] extension hint -> buf1 info (24 bytes); result pages */
 #define DR_RENDER 2   /* arg page, buf0 file, extra[0..1] largest page size -> buf1 ARGB; result width, aux height */
 #define DR_TEXT   3   /* buf0 file -> buf1 the text, ISO-8859-1, lines ending in LF; result bytes */
 
@@ -32,7 +32,8 @@ struct dr_buffer {
 int dr_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer buf[4],
             uint32_t *result, uint32_t *aux);
 
-/* The format's four letters ('DOCX', 'ODT ', ...), or 0 when not a document. */
-uint32_t dr_sniff(const uint8_t *d, uint32_t n);
+/* The format's four letters ('DOCX', 'ODT ', 'EPUB', ...), or 0 when not a
+ * document; hint is the extension in capitals ('CSV ') for text formats. */
+uint32_t dr_sniff(const uint8_t *d, uint32_t n, uint32_t hint);
 
 #endif

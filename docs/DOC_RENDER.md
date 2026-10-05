@@ -1,21 +1,26 @@
 # doc.render/1
 
-Office documents for an Amiga's datatypes. The host lays the document out
-with LibreOffice, once per file (the PDF is kept in a cache under
+Documents for an Amiga's datatypes. The host lays the document out with
+LibreOffice (PostScript with Ghostscript; EPUB and Markdown through pandoc
+first), once per file (the PDF is kept in a cache under
 `~/.cache/openservice/doc`, or `$OPENSERVICE_CACHE/doc`, named by the
 file's hash), and answers with pictures of its pages, or its text. Host
-code: `host/doc_render.c`; it runs `soffice`, `pdfinfo`, `pdftoppm` and
-`pdftotext`.
+code: `host/doc_render.c`; it runs `soffice`, `gs`, `pandoc`, `pdfinfo`,
+`pdftoppm` and `pdftotext`.
 
 Formats, as PROBE names them: `'DOCX'`, `'XLSX'`, `'PPTX'`, `'ODT '`,
 `'ODS '`, `'ODP '`, `'ODG '`, `'DOC '`, `'XLS '`, `'PPT '`, `'RTF '`,
-`'WPD '` (WordPerfect) and `'PDF '`.
+`'WPD '` (WordPerfect), `'PDF '`, `'PS  '` and `'EPS '` (an EPS page is
+the size of its drawing), `'EPUB'`, and the text formats that have no
+signature, named by the extension hint: `'CSV '`, `'TSV '` (comma or tab,
+UTF-8), `'MD  '` (also from `'MARK'`), `'HTML'` (also `'HTM '`) and
+`'TXT '`.
 
 | Op | Name | Request | Answer |
 | --- | --- | --- | --- |
-| 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest page width and height wanted (0: any); buf1 (out) 24 bytes of info | result the pages |
+| 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest page width and height wanted (0: any); `extra[2]` the extension as a hint, four ASCII letters big-endian, space-padded (0: none); buf1 (out) 24 bytes of info | result the pages |
 | 2 | RENDER | `arg` the page (0 the first); buf0 the file; `extra` as PROBE; buf1 (out) the pixels | result width, aux height |
-| 3 | TEXT | buf0 the file; buf1 (out) the text | result its bytes |
+| 3 | TEXT | buf0 the file; `extra[2]` as PROBE; buf1 (out) the text | result its bytes |
 
 PROBE's info, six big-endian u32s: kind (4 document), format, flags (0),
 pages, then the width and height RENDER writes for the same `extra`. A

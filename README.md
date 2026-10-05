@@ -66,7 +66,8 @@ The rest of `media.decode/1`'s formats need tools at run time only:
 RAW, `fluidsynth` with `fluid-soundfont-gm` for MIDI, and `sidplayfp` for
 SID tunes; a missing tool just means that format is refused.
 `doc.render/1` runs LibreOffice (`libreoffice-writer`, `-calc`,
-`-impress`) and poppler's tools (`poppler-utils`). `host/test_*.py` check
+`-impress`) and poppler's tools (`poppler-utils`), with `ghostscript` for
+PostScript and `pandoc` for EPUB and Markdown. `host/test_*.py` check
 each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and
 LibreOffice.
 
