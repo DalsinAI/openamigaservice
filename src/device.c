@@ -442,6 +442,13 @@ static int lanFor(const char *name)
     int i, c;
     if (!SocketBase)
         return -1;
+    {
+        /* No Cradle paired: nothing on the LAN to use, so no question asked. */
+        BPTR paired = Lock((CONST_STRPTR)OPENSERVICE_PAIRED_FILE, ACCESS_READ);
+        if (!paired)
+            return -1;
+        UnLock(paired);
+    }
     DateStamp(&ds);
     now = (ULONG)ds.ds_Days * 86400 + ds.ds_Minute * 60 + ds.ds_Tick / TICKS_PER_SECOND;
     if (!browsedAt || now - browsedAt > 30) {
