@@ -21,8 +21,9 @@ Programs ask by name and do not know where the work runs:
 | `src/mdns.c` | One mDNS question for `_amigachrome._tcp.local` |
 | `src/nursery.c` | `Nursery`: lists the boards and the Cradles on the LAN, and their services |
 | `src/servicetest.c` | `ServiceTest`: open, list and `echo/1` calls, checked and timed |
-| `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1` and `media.decode/1` |
+| `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
+| `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice (docs/DOC_RENDER.md) |
 | `host/media_decode.c`, `host/media_av.c` | `media.decode/1` on the host: AVIF and HEIC pictures, and sounds through FFmpeg, for openamigaimage's datatypes (docs/MEDIA_DECODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
 
@@ -59,8 +60,10 @@ libavif and libheif with libheif's HEVC decoder plugin for `media.decode/1`
 and FFmpeg's libraries for its sounds (on Ubuntu: `libavif-dev libheif-dev
 libheif-plugin-libde265 libavformat-dev libavcodec-dev libswresample-dev`).
 Without the HEVC plugin HEIC files are refused; without FFmpeg, sounds are.
-`host/test_media_decode.py` and `host/test_media_sound.py` check the decoder
-with files made by `avifenc`, `heif-enc` and `ffmpeg`.
+`doc.render/1` runs LibreOffice (`libreoffice-writer`, `-calc`,
+`-impress`) and poppler's tools (`poppler-utils`). `host/test_*.py` check
+each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and
+LibreOffice.
 
 Measured on AmigaOS 3.2.3 (AmigaChrome, OpenSocket) against a Cradle on
 another PC: 500 `echo/1` calls, all correct, 2.2 ms each.

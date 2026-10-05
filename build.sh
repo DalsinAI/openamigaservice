@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds openservice.device, Nursery and ServiceTest for AmigaOS 3.x with the
-# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's libraries: TLS keys, and media decoding.
+# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's libraries: TLS keys, media decoding and documents.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmigaChrome/stoves/os32-gcc16)
 # MIT, Copyright (c) 2026 Dalsin Limited.
 set -e
@@ -31,4 +31,6 @@ if pkg-config --exists libavif libheif 2>/dev/null; then
         gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c $(pkg-config --cflags --libs libavif libheif)
     fi
 fi
+# doc.render/1: needs LibreOffice and poppler's tools at run time only.
+gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c -lpthread
 ls -l bin

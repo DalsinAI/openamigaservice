@@ -9,7 +9,8 @@ for each buffer the service writes a u32 byte count and the bytes.
 Services here: the directory (OPEN, CLOSE, LIST, CANCEL), echo/1, which
 copies buffer 0 into buffer 1 as the emulator's test service does,
 opentls.key/1 (host/opentls_key.c) when host/libopentlskey.so is built, and
-media.decode/1 (host/media_decode.c) when host/libmediadecode.so is built.
+media.decode/1 (host/media_decode.c) when host/libmediadecode.so is built,
+and doc.render/1 (host/doc_render.c) when host/libdocrender.so is.
 
   nursery_host.py --fingerprint <fp>
 
@@ -58,8 +59,18 @@ try:                                                  # host/libmediadecode.so, 
 except OSError:
     pass
 
+try:                                                  # host/libdocrender.so, when built
+    import doc_render
+
+    def document(op, arg, bufs, extra, flags=0, lengths=(0, 0, 0, 0)):
+        return doc_render.call(op, arg, extra, flags, bufs, lengths)
+
+    SERVICES["doc.render/1"] = document
+except OSError:
+    pass
+
 # Services whose answers fill buffers the Amiga sized: they get the flags and room.
-SIZED = {"opentls.key/1", "media.decode/1"}
+SIZED = {"opentls.key/1", "media.decode/1", "doc.render/1"}
 
 
 class Connection(socketserver.BaseRequestHandler):
