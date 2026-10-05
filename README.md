@@ -30,6 +30,8 @@ Programs ask by name and do not know where the work runs:
 | `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
 | `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice (docs/DOC_RENDER.md) |
+| `host/cdxl.c`, `host/media_cdxl.py` | `media.cdxl/1`: any movie into CDXL for an ECS, AGA or RTG Amiga, as an option (docs/MEDIA_CDXL.md); `media_cdxl.py` does it from the Cradle's command line |
+| `src/tocdxl.c` | `ToCDXL`, the Amiga command for `media.cdxl/1` |
 | `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
 | `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for openamigaimage's datatypes (docs/MEDIA_DECODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
