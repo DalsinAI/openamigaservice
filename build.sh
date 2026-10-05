@@ -24,9 +24,9 @@ fi
 # media.decode/1: pictures with libavif, and libheif with its HEVC decoder
 # plugin; sounds with FFmpeg when its headers are there.
 if pkg-config --exists libavif libheif 2>/dev/null; then
-    if pkg-config --exists libavformat libavcodec libswresample libavutil 2>/dev/null; then
-        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c \
-            $(pkg-config --cflags --libs libavif libheif libavformat libavcodec libswresample libavutil)
+    if pkg-config --exists libavformat libavcodec libswresample libswscale libavutil 2>/dev/null; then
+        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c -lpthread \
+            $(pkg-config --cflags --libs libavif libheif libavformat libavcodec libswresample libswscale libavutil)
     else
         gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c $(pkg-config --cflags --libs libavif libheif)
     fi

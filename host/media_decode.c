@@ -260,7 +260,20 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
 
     *result = *aux = 0;
 #ifdef MD_AV
-    /* Not a picture this file knows: a sound (later video) through FFmpeg. */
+    if (op == MD_VOPEN) {
+        if (!buf[0].in || !buf[0].length || !md_is_av(buf[0].in, buf[0].length))
+            return MD_BADREQUEST;
+        if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
+            return MD_TOOSMALL;
+        if ((st = md_video_open(&buf[0], extra, buf[1].out, result, aux)) == MD_OK)
+            buf[1].written = MD_INFO_SIZE;
+        return st;
+    }
+    if (op == MD_VFRAME)
+        return md_video_frame(arg, extra, &buf[1], result, aux);
+    if (op == MD_VCLOSE)
+        return md_video_close(arg);
+    /* Not a picture this file knows: a sound through FFmpeg. */
     if ((op == MD_PROBE || op == MD_DECODE) && buf[0].in && buf[0].length
         && !sniff(buf[0].in, buf[0].length) && md_is_av(buf[0].in, buf[0].length)) {
         if (op == MD_DECODE)

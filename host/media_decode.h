@@ -11,8 +11,12 @@
 
 #define MD_PROBE  1   /* buf0 file, extra[0..1] largest size -> buf1 info (24 bytes); result width, aux height */
 #define MD_DECODE 2   /* arg frame, buf0 file, extra[0..1] largest size -> buf1 ARGB; result width, aux height */
+#define MD_VOPEN  3   /* buf0 file, extra[0..1] largest size -> buf1 info; result handle, aux fps x 1000 */
+#define MD_VFRAME 4   /* arg handle, extra[0] frame, extra[1] 0 chunky / 1 RGB -> buf1; result the frame */
+#define MD_VCLOSE 5   /* arg handle */
 
 #define MD_KIND_PICTURE 1
+#define MD_KIND_ANIMATION 2
 #define MD_KIND_SOUND   3
 
 #define MD_FORMAT_AVIF 0x41564946u   /* 'AVIF' */
@@ -25,8 +29,20 @@
 #define MD_FORMAT_ALAC   0x414c4143u /* 'ALAC' */
 #define MD_FORMAT_WMA    0x574d4120u /* 'WMA ' */
 #define MD_FORMAT_SOUND  0x534f554eu /* 'SOUN': another sound FFmpeg reads */
+#define MD_FORMAT_H264   0x48323634u /* 'H264' */
+#define MD_FORMAT_HEVC   0x48455643u /* 'HEVC' */
+#define MD_FORMAT_AV1    0x41563120u /* 'AV1 ' */
+#define MD_FORMAT_VP8    0x56503820u /* 'VP8 ' */
+#define MD_FORMAT_VP9    0x56503920u /* 'VP9 ' */
+#define MD_FORMAT_MPEG4  0x4d504734u /* 'MPG4' */
+#define MD_FORMAT_MPEG2  0x4d504732u /* 'MPG2': MPEG-1 and MPEG-2 */
+#define MD_FORMAT_WMV    0x574d5620u /* 'WMV ' */
+#define MD_FORMAT_MJPEG  0x4d4a5047u /* 'MJPG' */
+#define MD_FORMAT_THEORA 0x54484f52u /* 'THOR' */
+#define MD_FORMAT_VIDEO  0x56494445u /* 'VIDE': another video FFmpeg reads */
 
 #define MD_FLAG_ALPHA 1
+#define MD_FLAG_SOUND 2   /* a video with a sound track */
 
 #define MD_INFO_SIZE 24
 

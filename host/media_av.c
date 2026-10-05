@@ -1,7 +1,9 @@
 /*
- * media.decode/1 on the host, sound (docs/MEDIA_DECODE.md): any audio file
- * FFmpeg reads (FLAC, Ogg Vorbis, Opus, MP3, AAC, ALAC, WMA, WAV...)
- * answered as 16-bit big-endian PCM at the rate and channels asked for.
+ * media.decode/1 on the host, sound and video (docs/MEDIA_DECODE.md): any
+ * audio FFmpeg reads (FLAC, Ogg Vorbis, Opus, MP3, AAC, ALAC, WMA, WAV...)
+ * answered as 16-bit big-endian PCM at the rate and channels asked for, and
+ * any video (H.264, HEVC, AV1, VP9, MPEG-4, WMV...) kept open and answered
+ * frame by frame in 256 colours or 24-bit, scaled to fit.
  * MIT, Copyright (c) 2026 Dalsin Limited.
  */
 #include "media_decode.h"
@@ -15,6 +17,8 @@
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
+#include <pthread.h>
 
 /* Longer sounds are refused: 2^28 frames is 1 GB of 16-bit stereo. */
 #define MAX_FRAMES (1u << 28)
@@ -283,4 +287,294 @@ int md_is_av(const uint8_t *d, uint32_t n)
     av_probe_input_format3(&pd, 1, &score);
     av_free(buf);
     return score >= AVPROBE_SCORE_MAX / 4;
+}
+
+/* ---- video --------------------------------------------------------------- */
+
+/* Open videos, by handle (index + 1). A video stays open, with its own copy
+ * of the file, until VCLOSE or until MAX_VIDEOS newer ones push it out. */
+#define MAX_VIDEOS 8
+
+struct video {
+    int used;
+    uint32_t serial;           /* for pushing out the oldest */
+    uint8_t *file;
+    struct mem mem;
+    AVIOContext *io;
+    AVFormatContext *fmt;
+    AVCodecContext *dec;
+    struct SwsContext *sws;
+    AVPacket *pkt;
+    AVFrame *frame, *rgb;
+    int stream;
+    int64_t *pts;              /* each frame's time stamp, in presentation order */
+    uint32_t frames, ow, oh;
+    int64_t next;              /* the frame the decoder gives next; -1: unknown (seek) */
+};
+
+static struct video videos[MAX_VIDEOS];
+static uint32_t video_serial;
+static pthread_mutex_t video_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void video_free(struct video *v)
+{
+    av_frame_free(&v->frame);
+    av_frame_free(&v->rgb);
+    av_packet_free(&v->pkt);
+    sws_freeContext(v->sws);
+    avcodec_free_context(&v->dec);
+    avformat_close_input(&v->fmt);
+    if (v->io) {
+        av_freep(&v->io->buffer);
+        avio_context_free(&v->io);
+    }
+    free(v->pts);
+    free(v->file);
+    memset(v, 0, sizeof *v);
+}
+
+static uint32_t video_fourcc(enum AVCodecID id)
+{
+    switch (id) {
+    case AV_CODEC_ID_H264: return MD_FORMAT_H264;
+    case AV_CODEC_ID_HEVC: return MD_FORMAT_HEVC;
+    case AV_CODEC_ID_AV1: return MD_FORMAT_AV1;
+    case AV_CODEC_ID_VP8: return MD_FORMAT_VP8;
+    case AV_CODEC_ID_VP9: return MD_FORMAT_VP9;
+    case AV_CODEC_ID_MPEG4: return MD_FORMAT_MPEG4;
+    case AV_CODEC_ID_MPEG1VIDEO: case AV_CODEC_ID_MPEG2VIDEO: return MD_FORMAT_MPEG2;
+    case AV_CODEC_ID_WMV1: case AV_CODEC_ID_WMV2: case AV_CODEC_ID_WMV3: case AV_CODEC_ID_VC1: return MD_FORMAT_WMV;
+    case AV_CODEC_ID_MJPEG: return MD_FORMAT_MJPEG;
+    case AV_CODEC_ID_THEORA: return MD_FORMAT_THEORA;
+    default: return MD_FORMAT_VIDEO;
+    }
+}
+
+static int cmp64(const void *a, const void *b)
+{
+    int64_t x = *(const int64_t *)a, y = *(const int64_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static int video_open(struct video *v, const uint8_t *d, uint32_t n, uint32_t maxw, uint32_t maxh, uint32_t *fps1000)
+{
+    const AVCodec *codec = NULL;
+    AVStream *st;
+    uint8_t *iobuf;
+    uint32_t cap = 0;
+    AVRational rate;
+
+    av_log_set_level(AV_LOG_ERROR);
+    if (!(v->file = malloc(n)))
+        return MD_HOSTERROR;
+    memcpy(v->file, d, n);
+    v->mem.data = v->file;
+    v->mem.size = n;
+    if (!(iobuf = av_malloc(65536)))
+        return MD_HOSTERROR;
+    if (!(v->io = avio_alloc_context(iobuf, 65536, 0, &v->mem, mem_read, NULL, mem_seek))) {
+        av_free(iobuf);
+        return MD_HOSTERROR;
+    }
+    if (!(v->fmt = avformat_alloc_context()))
+        return MD_HOSTERROR;
+    v->fmt->pb = v->io;
+    if (avformat_open_input(&v->fmt, NULL, NULL, NULL) < 0 || avformat_find_stream_info(v->fmt, NULL) < 0)
+        return MD_BADREQUEST;
+    if ((v->stream = av_find_best_stream(v->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0)) < 0 || !codec)
+        return MD_BADREQUEST;
+    st = v->fmt->streams[v->stream];
+    if (st->disposition & AV_DISPOSITION_ATTACHED_PIC)
+        return MD_BADREQUEST;                 /* cover art in a sound file */
+    if (!(v->dec = avcodec_alloc_context3(codec)) || avcodec_parameters_to_context(v->dec, st->codecpar) < 0)
+        return MD_HOSTERROR;
+    v->dec->thread_count = 4;
+    if (avcodec_open2(v->dec, codec, NULL) < 0 || v->dec->width <= 0 || v->dec->height <= 0)
+        return MD_BADREQUEST;
+    if (!(v->pkt = av_packet_alloc()) || !(v->frame = av_frame_alloc()) || !(v->rgb = av_frame_alloc()))
+        return MD_HOSTERROR;
+
+    /* Every frame's time stamp, from the packets alone (no decoding). */
+    while (av_read_frame(v->fmt, v->pkt) >= 0) {
+        if (v->pkt->stream_index == v->stream) {
+            int64_t t = v->pkt->pts != AV_NOPTS_VALUE ? v->pkt->pts : v->pkt->dts;
+            if (v->frames == cap) {
+                int64_t *more = realloc(v->pts, (cap = cap ? cap * 2 : 1024) * sizeof *more);
+                if (!more) {
+                    av_packet_unref(v->pkt);
+                    return MD_HOSTERROR;
+                }
+                v->pts = more;
+            }
+            v->pts[v->frames] = t == AV_NOPTS_VALUE ? (int64_t)v->frames : t;
+            v->frames++;
+        }
+        av_packet_unref(v->pkt);
+    }
+    if (!v->frames)
+        return MD_BADREQUEST;
+    qsort(v->pts, v->frames, sizeof *v->pts, cmp64);
+    v->next = -1;
+
+    md_fit(v->dec->width, v->dec->height, maxw, maxh, &v->ow, &v->oh);
+    if (!(v->sws = sws_getContext(v->dec->width, v->dec->height, v->dec->pix_fmt, v->ow, v->oh, AV_PIX_FMT_RGB24,
+                                  SWS_AREA, NULL, NULL, NULL)))
+        return MD_HOSTERROR;
+    v->rgb->format = AV_PIX_FMT_RGB24;
+    v->rgb->width = v->ow;
+    v->rgb->height = v->oh;
+    if (av_frame_get_buffer(v->rgb, 0) < 0)
+        return MD_HOSTERROR;
+    rate = av_guess_frame_rate(v->fmt, st, NULL);
+    *fps1000 = rate.num > 0 && rate.den > 0 ? (uint32_t)((int64_t)rate.num * 1000 / rate.den) : 25000;
+    return MD_OK;
+}
+
+/* The 6x6x6 colour cube with 4x4 ordered dithering: index i < 216 is red
+ * (i / 36), green (i / 6 % 6) and blue (i % 6), each step 51, as
+ * openamigaimage's webm.datatype draws. */
+static void dither(const uint8_t *rgb, int pitch, uint32_t w, uint32_t h, uint8_t *out)
+{
+    static const uint8_t bayer[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };
+    uint32_t x, y;
+
+    for (y = 0; y < h; y++) {
+        const uint8_t *s = rgb + (size_t)y * pitch;
+        for (x = 0; x < w; x++, s += 3) {
+            int dd = bayer[y & 3][x & 3] * 16;
+            *out++ = (uint8_t)(((s[0] * 5 + dd) >> 8) * 36 + ((s[1] * 5 + dd) >> 8) * 6 + ((s[2] * 5 + dd) >> 8));
+        }
+    }
+}
+
+/* Decodes up to frame index want (by its time stamp) and leaves it in v->rgb. */
+static int video_seek_decode(struct video *v, uint32_t want)
+{
+    int64_t target = v->pts[want];
+    int eof = 0;
+
+    if (v->next < 0 || want < v->next || want > v->next + 50) {
+        avcodec_flush_buffers(v->dec);
+        if (av_seek_frame(v->fmt, v->stream, target, AVSEEK_FLAG_BACKWARD) < 0)
+            av_seek_frame(v->fmt, v->stream, v->pts[0], AVSEEK_FLAG_BACKWARD);
+        v->next = -1;
+    }
+    for (;;) {
+        int r = avcodec_receive_frame(v->dec, v->frame);
+        if (r == 0) {
+            int64_t t = v->frame->best_effort_timestamp;
+            if (t == AV_NOPTS_VALUE || t >= target) {
+                sws_scale(v->sws, (const uint8_t *const *)v->frame->data, v->frame->linesize, 0, v->dec->height,
+                          v->rgb->data, v->rgb->linesize);
+                av_frame_unref(v->frame);
+                v->next = want + 1;
+                return MD_OK;
+            }
+            av_frame_unref(v->frame);
+            continue;
+        }
+        if (r == AVERROR_EOF || (r != AVERROR(EAGAIN)))
+            return MD_BADREQUEST;
+        if (eof)
+            return MD_BADREQUEST;
+        if (av_read_frame(v->fmt, v->pkt) < 0) {
+            avcodec_send_packet(v->dec, NULL);
+            eof = 1;
+            continue;
+        }
+        if (v->pkt->stream_index == v->stream)
+            avcodec_send_packet(v->dec, v->pkt);
+        av_packet_unref(v->pkt);
+    }
+}
+
+int md_video_open(const struct md_buffer *file, const uint32_t extra[4], uint8_t info[MD_INFO_SIZE],
+                  uint32_t *result, uint32_t *aux)
+{
+    struct video *v = NULL;
+    uint32_t i, fps = 0;
+    int st, audio;
+
+    pthread_mutex_lock(&video_lock);
+    for (i = 0; i < MAX_VIDEOS && !v; i++)
+        if (!videos[i].used)
+            v = &videos[i];
+    if (!v) {                                  /* push out the oldest */
+        v = &videos[0];
+        for (i = 1; i < MAX_VIDEOS; i++)
+            if (videos[i].serial < v->serial)
+                v = &videos[i];
+        video_free(v);
+    }
+    v->used = 1;
+    v->serial = ++video_serial;
+    st = video_open(v, file->in, file->length, extra[0], extra[1], &fps);
+    if (st != MD_OK) {
+        video_free(v);
+        pthread_mutex_unlock(&video_lock);
+        return st;
+    }
+    audio = av_find_best_stream(v->fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0) >= 0;
+    md_put32(info, MD_KIND_ANIMATION);
+    md_put32(info + 4, video_fourcc(v->dec->codec_id));
+    md_put32(info + 8, audio ? MD_FLAG_SOUND : 0);
+    md_put32(info + 12, v->frames);
+    md_put32(info + 16, v->ow);
+    md_put32(info + 20, v->oh);
+    *result = (uint32_t)(v - videos) + 1;
+    *aux = fps;
+    pthread_mutex_unlock(&video_lock);
+    return MD_OK;
+}
+
+int md_video_frame(uint32_t handle, const uint32_t extra[4], struct md_buffer *out, uint32_t *result, uint32_t *aux)
+{
+    struct video *v;
+    uint32_t want = extra[0];
+    int st;
+
+    if (!handle || handle > MAX_VIDEOS)
+        return MD_BADREQUEST;
+    pthread_mutex_lock(&video_lock);
+    v = &videos[handle - 1];
+    if (!v->used) {
+        pthread_mutex_unlock(&video_lock);
+        return MD_BADREQUEST;
+    }
+    if (want >= v->frames)
+        want = v->frames - 1;
+    if (!out->out || out->length < v->ow * v->oh) {
+        pthread_mutex_unlock(&video_lock);
+        return MD_TOOSMALL;
+    }
+    if ((st = video_seek_decode(v, want)) == MD_OK) {
+        if (extra[1] == 1) {                       /* 24-bit RGB */
+            uint32_t y;
+            if (out->length < v->ow * v->oh * 3)
+                st = MD_TOOSMALL;
+            else {
+                for (y = 0; y < v->oh; y++)
+                    memcpy(out->out + (size_t)y * v->ow * 3, v->rgb->data[0] + (size_t)y * v->rgb->linesize[0], v->ow * 3);
+                out->written = v->ow * v->oh * 3;
+            }
+        } else {
+            dither(v->rgb->data[0], v->rgb->linesize[0], v->ow, v->oh, out->out);
+            out->written = v->ow * v->oh;
+        }
+        *result = want;
+        *aux = 0;
+    }
+    pthread_mutex_unlock(&video_lock);
+    return st;
+}
+
+int md_video_close(uint32_t handle)
+{
+    if (!handle || handle > MAX_VIDEOS)
+        return MD_BADREQUEST;
+    pthread_mutex_lock(&video_lock);
+    if (videos[handle - 1].used)
+        video_free(&videos[handle - 1]);
+    pthread_mutex_unlock(&video_lock);
+    return MD_OK;
 }

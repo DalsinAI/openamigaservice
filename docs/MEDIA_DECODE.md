@@ -5,10 +5,12 @@ file, the host answers with 32-bit ARGB pixels scaled down to fit, or 16-bit
 PCM at the rate and channels the Amiga can play. Host code:
 `host/media_decode.c` for AVIF (libavif) and HEIC/HEIF (libheif), and
 `host/media_av.c` for any sound FFmpeg reads (FLAC, Ogg Vorbis, Opus, MP3,
-AAC, ALAC, WMA and more). Video comes to the same service later.
+AAC, ALAC, WMA and more) and any video it reads (H.264, HEVC, AV1, VP8/VP9,
+MPEG-4, MPEG-1/2, WMV, MJPEG, Theora).
 
 The Amiga side is openamigaimage's datatypes (`heif.datatype`,
-`opensound.datatype`). They
+`opensound.datatype`, `openvideo.datatype`, and `webm.datatype` for its
+sound). They
 assume a services card, or PiStorm-class or AmigaChrome-class networking to
 a Cradle, so the decoded pixels come back whole.
 
@@ -53,3 +55,27 @@ becomes 22.05 kHz for a limit of 28000). Samples are 16-bit signed
 big-endian, the channels interleaved. DECODE writes as many frames as buf1
 holds from `arg` on, so a long sound can come in pieces; there is no
 TOOSMALL for sounds (except a buf1 smaller than one frame).
+
+## Video
+
+A video is sent once and kept open on the host, so each frame costs only
+its pixels. The host keeps at most 8 open (the oldest goes first); handles
+belong to the host, not to one Amiga.
+
+| Op | Name | Request | Answer |
+| --- | --- | --- | --- |
+| 3 | VOPEN | buf0 the file; `extra[0]`, `extra[1]` the largest width and height wanted; buf1 (out) 24 bytes of info | result the handle, aux frames a second x 1000 |
+| 4 | VFRAME | `arg` the handle; `extra[0]` the frame (0 the first; past the end: the last); `extra[1]` 0 for 256 colours, 1 for 24-bit RGB; buf1 (out) the frame | result the frame given |
+| 5 | VCLOSE | `arg` the handle | |
+
+VOPEN's info: kind (2 animation), format (`'H264'`, `'HEVC'`, `'AV1 '`,
+`'VP8 '`, `'VP9 '`, `'MPG4'`, `'MPG2'`, `'WMV '`, `'MJPG'`, `'THOR'`, or
+`'VIDE'` for another), flags (bit 1: it has a sound track, which PROBE and
+DECODE give as a sound), frames, then the width and height of each frame.
+
+VFRAME in 256 colours is one byte a pixel, rows packed, in the 6x6x6
+colour cube that openamigaimage's webm.datatype uses (index i < 216 is red
+i / 36, green i / 6 % 6, blue i % 6, each step 51; 216 to 255 a grey ramp,
+unused here), with 4x4 ordered dithering. In 24-bit it is R, G, B bytes.
+Frames asked for in order are decoded straight on; going back, or jumping
+more than 50 frames ahead, seeks to the key frame before.
