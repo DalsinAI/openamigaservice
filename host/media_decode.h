@@ -36,6 +36,7 @@
 #define MD_FORMAT_DPX  0x44505820u   /* 'DPX ' */
 #define MD_FORMAT_PCX  0x50435820u   /* 'PCX ' */
 #define MD_FORMAT_SGI  0x53474920u   /* 'SGI ' */
+#define MD_FORMAT_SVG  0x53564720u   /* 'SVG ': drawn by librsvg, at the size asked */
 #define MD_FORMAT_STILL  0x5354494cu /* 'STIL': another picture FFmpeg reads */
 #define MD_FORMAT_RAW    0x52415720u /* 'RAW ': camera RAW, through LibRaw */
 #define MD_FORMAT_MAGICK 0x494d474bu /* 'IMGK': another picture ImageMagick reads (else the hint, 'TGA ') */
@@ -70,6 +71,10 @@
 #define MD_FLAG_SOUND 2   /* a video with a sound track */
 
 #define MD_INFO_SIZE 24
+
+/* extra[3] for PROBE and DECODE of a picture: draw an SVG at exactly
+ * extra[0] x extra[1] (one 0: kept to its aspect; both 0: its own size). */
+#define MD_EXACT 1
 
 /* Status, as the services card's. */
 #define MD_OK          0

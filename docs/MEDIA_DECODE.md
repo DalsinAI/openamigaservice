@@ -21,14 +21,14 @@ a Cradle, so the decoded pixels come back whole.
 
 | Op | Name | Request | Answer |
 | --- | --- | --- | --- |
-| 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest width and height wanted (0: any); `extra[2]` the file's extension as a hint (0: none); buf1 (out) 24 bytes of info | result width, aux height (the picture's own) |
-| 2 | DECODE | `arg` the frame (0 the first); buf0 the file; `extra[0..2]` as PROBE; buf1 (out) the pixels | result width, aux height (of the pixels written) |
+| 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest width and height wanted (0: any); `extra[2]` the file's extension as a hint (0: none); `extra[3]` bit 0 `MD_EXACT`, for SVG (below); buf1 (out) 24 bytes of info | result width, aux height (the picture's own) |
+| 2 | DECODE | `arg` the frame (0 the first); buf0 the file; `extra[0..3]` as PROBE; buf1 (out) the pixels | result width, aux height (of the pixels written) |
 
 PROBE's info, six big-endian u32s: kind (1 picture), format, flags (bit 0:
 alpha), frames, then the width and height DECODE will write for the same
 `extra[0]` and `extra[1]`. Formats: `'AVIF'`, `'HEIC'`, `'JPEG'`, `'PNG '`,
 `'GIF '`, `'WEBP'`, `'JXL '`, `'EXR '`, `'HDR '`, `'PSD '`, `'QOI '`,
-`'DDS '`, `'J2K '`, `'TIFF'`, `'DPX '`, `'PCX '`, `'SGI '`, `'STIL'` (another
+`'DDS '`, `'J2K '`, `'TIFF'`, `'DPX '`, `'PCX '`, `'SGI '`, `'SVG '`, `'STIL'` (another
 picture FFmpeg reads), `'RAW '` (camera RAW), or for ImageMagick the hint in
 capitals (`'TGA '`), else `'IMGK'`.
 
@@ -55,6 +55,29 @@ Pictures without alpha have A = 255.
 
 Status: 0; -2 for a file it cannot decode or a format it does not know; -4
 when buf1 is too small (PROBE's info says the size to give).
+
+## SVG
+
+SVG and SVGZ (format `'SVG '`, always with alpha) are drawn by librsvg and
+cairo straight at the size wanted, not decoded and shrunk: a 16x16 icon at
+64x64 takes well under a millisecond once loaded. The host opens
+`librsvg-2.so.2` when first needed, so no development package is built
+against; without it, SVG goes to ImageMagick like any other picture.
+
+An SVG's own size (PROBE's result and aux) is the browser's: its `width` and
+`height` in pixels at 96 dots an inch, else its `viewBox`'s size (one of
+`width` and `height` with the `viewBox`'s aspect), else 300 x 150.
+
+`extra[3]` bit 0 (`MD_EXACT`) asks for exactly `extra[0]` x `extra[1]`, as a
+browser draws an `<img>` with a width and height: the drawing is placed in
+that box by its `preserveAspectRatio` (centred and fitted by default,
+stretched for `none`), transparent around it. One of them 0 keeps the SVG's
+aspect; both 0 gives its own size. Sides are capped at 4096, keeping the
+shape. An SVG without a `viewBox` is scaled as a whole and centred. Without
+`MD_EXACT`, `extra[0..1]` are the largest size, as for any picture, so a
+datatype's 4096 x 4096 never blows an icon up. SVGZ needs the hint `'SVGZ'`
+(or `'SVG '`); a text SVG is recognised by an `<svg` element in its first
+4 KB.
 
 Frames: an AVIF sequence or a HEIF file with several images reports them in
 `frames`; DECODE's `arg` picks one. Rotation and mirroring in HEIF files are
