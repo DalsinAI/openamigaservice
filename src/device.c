@@ -41,7 +41,9 @@
 #endif
 
 const char DevName[] = OPENSERVICE_NAME;
-const char DevIdString[] = "openservice.device 1.0 (5.10.2026)";
+/* "Version DEVS:openservice.device" reads this; the ROMTag shows the rest. */
+const char DevVersion[] __attribute__((used)) = "$VER: openservice.device 1.0 (5.10.2026)";
+#define DevIdString (DevVersion + 6)
 #define DEV_VERSION 1
 #define DEV_REVISION 0
 

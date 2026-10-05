@@ -17,7 +17,7 @@
 
 #include "devices/openservice.h"
 
-static const char version[] = "$VER: ServiceTest 0.1 (5.10.2026)";
+const char version[] __attribute__((used)) = "$VER: ServiceTest 0.1 (5.10.2026)";
 
 static LONG run(struct OSRequest *io, UWORD command)
 {
@@ -37,7 +37,6 @@ int main(void)
     static char list[512], in[256], out[256];
     struct DateStamp t0, t1;
     UWORD handle;
-    (void)version;
     if (!rd || !io) {
         printf("ServiceTest: no memory or bad arguments\n");
         return RETURN_FAIL;

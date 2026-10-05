@@ -32,7 +32,7 @@
 #include "openservice.h"
 #include "mdns.h"
 
-static const char version[] = "$VER: Nursery 0.1 (5.10.2026)";
+const char version[] __attribute__((used)) = "$VER: Nursery 0.1 (5.10.2026)";
 
 struct Library *SocketBase;
 struct ExpansionBase *ExpansionBase;
@@ -108,7 +108,6 @@ int main(void)
     LONG args[2] = { 0, 0 };
     struct RDArgs *rd = ReadArgs((CONST_STRPTR)"TIME/N,ALL/S", args, NULL);
     int seconds = 2;
-    (void)version;
     if (!rd) {
         PrintFault(IoErr(), (CONST_STRPTR)"Nursery");
         return RETURN_FAIL;
