@@ -32,5 +32,5 @@ if pkg-config --exists libavif libheif 2>/dev/null; then
     fi
 fi
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.
-gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c -lpthread
+gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread
 ls -l bin

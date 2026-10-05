@@ -6,19 +6,15 @@
  */
 #define _GNU_SOURCE
 #include "doc_render.h"
+#include "hostrun.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
-
-extern char **environ;
 
 /* Pages larger than this are refused: 2^26 pixels is 256 MB of ARGB. */
 #define MAX_PIXELS (1u << 26)
@@ -148,52 +144,6 @@ static void key(const uint8_t *d, uint32_t n, char *out, size_t room)
     snprintf(out, room, "%016llx-%u", (unsigned long long)h, (unsigned)n);
 }
 
-/* Runs argv with stdout to fd_out (-1: /dev/null); 0 when it exits 0. */
-static int run(char *const argv[], int fd_out)
-{
-    posix_spawn_file_actions_t fa;
-    pid_t pid;
-    int st = -1, rc;
-
-    posix_spawn_file_actions_init(&fa);
-    if (fd_out >= 0)
-        posix_spawn_file_actions_adddup2(&fa, fd_out, 1);
-    else
-        posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
-    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
-    rc = posix_spawnp(&pid, argv[0], &fa, NULL, argv, environ);
-    posix_spawn_file_actions_destroy(&fa);
-    if (rc)
-        return -1;
-    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-        ;
-    return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
-}
-
-/* Runs argv and reads its stdout into a malloc'd, NUL-ended buffer. */
-static char *run_read(char *const argv[], size_t *len)
-{
-    FILE *f = tmpfile();
-    char *out = NULL;
-    long n;
-
-    if (!f)
-        return NULL;
-    if (run(argv, fileno(f)) == 0 && (n = ftell(f), fseek(f, 0, SEEK_END), n = ftell(f)) >= 0) {
-        rewind(f);
-        if ((out = malloc(n + 1)) && fread(out, 1, n, f) == (size_t)n) {
-            out[n] = 0;
-            if (len)
-                *len = n;
-        } else {
-            free(out);
-            out = NULL;
-        }
-    }
-    fclose(f);
-    return out;
-}
-
 /* The document as a PDF in the cache (path into pdf); 0 on success. */
 static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size_t room)
 {
@@ -224,7 +174,7 @@ static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size
     {
         char *argv[] = { "soffice", profile, "--headless", "--norestore", "--nolockcheck",
                          "--convert-to", "pdf", "--outdir", dir, src, NULL };
-        rc = run(argv, -1);
+        rc = hr_run(argv, -1);
     }
     pthread_mutex_unlock(&convert_lock);
     unlink(src);
@@ -235,7 +185,7 @@ static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size
 static int pdf_info(const char *pdf, uint32_t *pages, double *wpt, double *hpt)
 {
     char *argv[] = { "pdfinfo", (char *)pdf, NULL };
-    char *out = run_read(argv, NULL), *p;
+    char *out = hr_run_read(argv, NULL), *p;
     int ok = 0;
 
     if (!out)
@@ -280,7 +230,7 @@ static int render(const char *pdf, uint32_t page, uint32_t w, uint32_t h, uint8_
     snprintf(first, sizeof first, "%u", page + 1);
     snprintf(sw, sizeof sw, "%u", w);
     snprintf(sh, sizeof sh, "%u", h);
-    if (!(ppm = run_read(argv, &len)))
+    if (!(ppm = hr_run_read(argv, &len)))
         return -1;
     if (sscanf(ppm, "P6 %u %u %u%n", &pw, &ph, &maxv, &consumed) != 3 || pw != w || ph != h || maxv != 255) {
         free(ppm);
@@ -303,7 +253,7 @@ static int render(const char *pdf, uint32_t page, uint32_t w, uint32_t h, uint8_
 static char *text(const char *pdf, size_t *len)
 {
     char *argv[] = { "pdftotext", "-enc", "Latin1", "-layout", (char *)pdf, "-", NULL };
-    return run_read(argv, len);
+    return hr_run_read(argv, len);
 }
 
 int dr_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer buf[4],
