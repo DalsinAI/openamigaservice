@@ -15,6 +15,7 @@
 #include <libheif/heif.h>
 
 #include "media_tool.h"
+#include "media_svg.h"
 #ifdef MD_AV
 #include "media_av.h"
 #endif
@@ -319,6 +320,9 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
 
     *result = *aux = 0;
     md_hint(extra[2], hint);
+    /* SVG is drawn at the size asked, not decoded and shrunk. */
+    if ((op == MD_PROBE || op == MD_DECODE) && md_svg_is(buf[0].in, buf[0].length, hint))
+        return md_svg_call(op, extra, buf, result, aux);
 #ifdef MD_AV
     if (op == MD_VOPEN) {
         if (!buf[0].in || !buf[0].length || md_is_av(buf[0].in, buf[0].length) != MD_AV_MEDIA)
