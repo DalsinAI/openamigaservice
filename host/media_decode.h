@@ -21,6 +21,28 @@
 
 #define MD_FORMAT_AVIF 0x41564946u   /* 'AVIF' */
 #define MD_FORMAT_HEIC 0x48454943u   /* 'HEIC' */
+#define MD_FORMAT_JPEG 0x4a504547u   /* 'JPEG' */
+#define MD_FORMAT_PNG  0x504e4720u   /* 'PNG ' */
+#define MD_FORMAT_GIF  0x47494620u   /* 'GIF ': the first frame */
+#define MD_FORMAT_WEBP 0x57454250u   /* 'WEBP' */
+#define MD_FORMAT_JXL  0x4a584c20u   /* 'JXL ' */
+#define MD_FORMAT_EXR  0x45585220u   /* 'EXR ' */
+#define MD_FORMAT_HDR  0x48445220u   /* 'HDR ' */
+#define MD_FORMAT_PSD  0x50534420u   /* 'PSD ' */
+#define MD_FORMAT_QOI  0x514f4920u   /* 'QOI ' */
+#define MD_FORMAT_DDS  0x44445320u   /* 'DDS ' */
+#define MD_FORMAT_J2K  0x4a324b20u   /* 'J2K ' */
+#define MD_FORMAT_TIFF 0x54494646u   /* 'TIFF' */
+#define MD_FORMAT_DPX  0x44505820u   /* 'DPX ' */
+#define MD_FORMAT_PCX  0x50435820u   /* 'PCX ' */
+#define MD_FORMAT_SGI  0x53474920u   /* 'SGI ' */
+#define MD_FORMAT_STILL  0x5354494cu /* 'STIL': another picture FFmpeg reads */
+#define MD_FORMAT_RAW    0x52415720u /* 'RAW ': camera RAW, through LibRaw */
+#define MD_FORMAT_MAGICK 0x494d474bu /* 'IMGK': another picture ImageMagick reads (else the hint, 'TGA ') */
+#define MD_FORMAT_MIDI   0x4d494449u /* 'MIDI', rendered by FluidSynth */
+#define MD_FORMAT_SID    0x53494420u /* 'SID ', rendered by sidplayfp */
+#define MD_FORMAT_MODULE 0x4d4f4420u /* 'MOD ': tracker modules, through libopenmpt */
+#define MD_FORMAT_CHIPTUNE 0x474d4520u /* 'GME ': NSF, SPC, VGM... through Game Music Emu */
 #define MD_FORMAT_FLAC   0x464c4143u /* 'FLAC' */
 #define MD_FORMAT_VORBIS 0x564f5242u /* 'VORB' */
 #define MD_FORMAT_OPUS   0x4f505553u /* 'OPUS' */

@@ -56,5 +56,5 @@ with tempfile.TemporaryDirectory() as tmp:
         assert call(DECODE, data, 200, 200, room=100)[0] == -4, name
         print(f"{name}: probe {pw}x{ph} alpha, decode exact={exact} worst={worst}, scaled 200x150")
     assert call(PROBE, b"not a picture at all", room=24)[0] == -2
-    assert call(DECODE, open(os.path.join(tmp, "g.png"), "rb").read(), room=w * h * 4)[0] == -2
+    assert call(DECODE, open(os.path.join(tmp, "g.avif"), "rb").read()[:300], room=w * h * 4)[0] == -2
     print("bad files refused")

@@ -1,7 +1,9 @@
 /*
  * media.decode/1 on the host (docs/MEDIA_DECODE.md): AVIF through libavif,
- * HEIC/HEIF through libheif, answered as 32-bit ARGB scaled to fit; sounds
- * through FFmpeg (media_av.c) when built with MD_AV.
+ * HEIC/HEIF through libheif, camera RAW and anything else ImageMagick reads
+ * through those tools (media_tool.c), answered as 32-bit ARGB scaled to fit;
+ * with MD_AV, JPEG, PNG, GIF, WebP, JPEG XL, PSD, EXR... and sounds, videos,
+ * MIDI and SID tunes through FFmpeg (media_av.c).
  * MIT, Copyright (c) 2026 Dalsin Limited.
  */
 #include "media_decode.h"
@@ -12,6 +14,7 @@
 #include <avif/avif.h>
 #include <libheif/heif.h>
 
+#include "media_tool.h"
 #ifdef MD_AV
 #include "media_av.h"
 #endif
@@ -236,8 +239,11 @@ static void shrink(const uint8_t *src, uint32_t w, uint32_t h, uint8_t *dst, uin
 
 /* ---- the service ------------------------------------------------------- */
 
-static int load(const struct md_buffer *file, uint32_t frame, int decode, struct picture *p)
+static int load(const struct md_buffer *file, const char *hint, uint32_t frame, int decode, struct picture *p)
 {
+    uint8_t **argb = decode ? &p->argb : NULL;
+    int raw;
+
     memset(p, 0, sizeof *p);
     if (!file->in || !file->length)
         return MD_BADREQUEST;
@@ -246,22 +252,60 @@ static int load(const struct md_buffer *file, uint32_t frame, int decode, struct
         return avif_load(file->in, file->length, frame, decode, p);
     case MD_FORMAT_HEIC:
         return heif_load(file->in, file->length, frame, decode, p);
-    default:
-        return MD_BADREQUEST;
     }
+    p->frames = 1;
+    /* Camera RAW is TIFF inside, so it goes to LibRaw before FFmpeg sees it. */
+    if ((raw = md_is_raw(file->in, file->length, hint)))
+        return md_tool_picture(file->in, file->length, hint, 1, &p->format, &p->flags, &p->width, &p->height, argb);
+#ifdef MD_AV
+    if (md_is_av(file->in, file->length) == MD_AV_STILL
+        && md_still_load(file->in, file->length, decode, &p->format, &p->flags, &p->width, &p->height,
+                         &p->argb) == MD_OK)
+        return MD_OK;
+#endif
+    return md_tool_picture(file->in, file->length, hint, 0, &p->format, &p->flags, &p->width, &p->height, argb);
 }
+
+#ifdef MD_AV
+/* A MIDI or SID tune: rendered to WAV on the host, then answered as any sound. */
+static int tune(uint16_t op, uint32_t kind, uint32_t arg, const uint32_t extra[4], struct md_buffer buf[4],
+                uint32_t *result, uint32_t *aux)
+{
+    struct md_buffer wav = { 0 };
+    uint8_t *d;
+    uint32_t len = 0;
+    int st;
+
+    if (!buf[1].out || (op == MD_PROBE && buf[1].length < MD_INFO_SIZE))
+        return MD_TOOSMALL;
+    if (!(d = md_tune_render(buf[0].in, buf[0].length, kind, &len)))
+        return MD_BADREQUEST;
+    wav.in = d;
+    wav.length = len;
+    if (op == MD_DECODE)
+        st = md_sound_decode(&wav, arg, extra, &buf[1], result, aux);
+    else if ((st = md_sound_probe(&wav, extra, buf[1].out, result, aux)) == MD_OK) {
+        md_put32(buf[1].out + 4, kind);
+        buf[1].written = MD_INFO_SIZE;
+    }
+    free(d);
+    return st;
+}
+#endif
 
 int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer buf[4],
             uint32_t *result, uint32_t *aux)
 {
     struct picture p;
     uint32_t ow, oh;
+    char hint[8];
     int st;
 
     *result = *aux = 0;
+    md_hint(extra[2], hint);
 #ifdef MD_AV
     if (op == MD_VOPEN) {
-        if (!buf[0].in || !buf[0].length || !md_is_av(buf[0].in, buf[0].length))
+        if (!buf[0].in || !buf[0].length || md_is_av(buf[0].in, buf[0].length) != MD_AV_MEDIA)
             return MD_BADREQUEST;
         if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
             return MD_TOOSMALL;
@@ -273,23 +317,28 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
         return md_video_frame(arg, extra, &buf[1], result, aux);
     if (op == MD_VCLOSE)
         return md_video_close(arg);
-    /* Not a picture this file knows: a sound through FFmpeg. */
-    if ((op == MD_PROBE || op == MD_DECODE) && buf[0].in && buf[0].length
-        && !sniff(buf[0].in, buf[0].length) && md_is_av(buf[0].in, buf[0].length)) {
-        if (op == MD_DECODE)
-            return buf[1].out ? md_sound_decode(&buf[0], arg, extra, &buf[1], result, aux) : MD_TOOSMALL;
-        if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
-            return MD_TOOSMALL;
-        if ((st = md_sound_probe(&buf[0], extra, buf[1].out, result, aux)) == MD_OK)
-            buf[1].written = MD_INFO_SIZE;
-        return st;
+    if ((op == MD_PROBE || op == MD_DECODE) && buf[0].in && buf[0].length) {
+        uint32_t kind = md_tune_sniff(buf[0].in, buf[0].length);
+        if (kind)
+            return tune(op, kind, arg, extra, buf, result, aux);
+        /* Not a picture: a sound through FFmpeg. */
+        if (!sniff(buf[0].in, buf[0].length) && !md_is_raw(buf[0].in, buf[0].length, hint)
+            && md_is_av(buf[0].in, buf[0].length) == MD_AV_MEDIA) {
+            if (op == MD_DECODE)
+                return buf[1].out ? md_sound_decode(&buf[0], arg, extra, &buf[1], result, aux) : MD_TOOSMALL;
+            if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
+                return MD_TOOSMALL;
+            if ((st = md_sound_probe(&buf[0], extra, buf[1].out, result, aux)) == MD_OK)
+                buf[1].written = MD_INFO_SIZE;
+            return st;
+        }
     }
 #endif
     switch (op) {
     case MD_PROBE:
         if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
             return MD_TOOSMALL;
-        if ((st = load(&buf[0], 0, 0, &p)) != MD_OK)
+        if ((st = load(&buf[0], hint, 0, 0, &p)) != MD_OK)
             return st;
         md_fit(p.width, p.height, extra[0], extra[1], &ow, &oh);
         md_put32(buf[1].out, MD_KIND_PICTURE);
@@ -305,7 +354,7 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
     case MD_DECODE:
         if (!buf[1].out)
             return MD_TOOSMALL;
-        if ((st = load(&buf[0], arg, 1, &p)) != MD_OK)
+        if ((st = load(&buf[0], hint, arg, 1, &p)) != MD_OK)
             return st;
         md_fit(p.width, p.height, extra[0], extra[1], &ow, &oh);
         if ((uint64_t)ow * oh * 4 > buf[1].length) {

@@ -22,13 +22,14 @@ if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
 fi
 # media.decode/1: pictures with libavif, and libheif with its HEVC decoder
-# plugin; sounds with FFmpeg when its headers are there.
+# plugin; sounds, video and most pictures with FFmpeg when its headers are
+# there; RAW, ImageMagick, MIDI and SID through those tools at run time.
 if pkg-config --exists libavif libheif 2>/dev/null; then
     if pkg-config --exists libavformat libavcodec libswresample libswscale libavutil 2>/dev/null; then
-        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c -lpthread \
+        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c host/media_tool.c host/hostrun.c -lpthread \
             $(pkg-config --cflags --libs libavif libheif libavformat libavcodec libswresample libswscale libavutil)
     else
-        gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c $(pkg-config --cflags --libs libavif libheif)
+        gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_tool.c host/hostrun.c $(pkg-config --cflags --libs libavif libheif)
     fi
 fi
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.

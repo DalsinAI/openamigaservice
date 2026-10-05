@@ -118,3 +118,39 @@ uint8_t *hr_read(const char *path, size_t *len)
     fclose(f);
     return out;
 }
+
+int hr_cache_dir(const char *kind, char *out, size_t room)
+{
+    const char *base = getenv("OPENSERVICE_CACHE");
+    char tmp[512];
+
+    if (base)
+        snprintf(out, room, "%s/%s", base, kind);
+    else if ((base = getenv("XDG_CACHE_HOME")) && *base)
+        snprintf(out, room, "%s/openservice/%s", base, kind);
+    else if ((base = getenv("HOME")) && *base)
+        snprintf(out, room, "%s/.cache/openservice/%s", base, kind);
+    else
+        snprintf(out, room, "/tmp/openservice-%s-%u", kind, (unsigned)getuid());
+    /* mkdir -p */
+    snprintf(tmp, sizeof tmp, "%s", out);
+    for (char *p = tmp + 1; *p; p++)
+        if (*p == '/') {
+            *p = 0;
+            mkdir(tmp, 0700);
+            *p = '/';
+        }
+    return mkdir(tmp, 0700) == 0 || errno == EEXIST ? 0 : -1;
+}
+
+void hr_key(const uint8_t *d, uint32_t n, char *out, size_t room)
+{
+    uint64_t h = 1469598103934665603ULL;
+    uint32_t i;
+
+    for (i = 0; i < n; i++) {
+        h ^= d[i];
+        h *= 1099511628211ULL;
+    }
+    snprintf(out, room, "%016llx-%u", (unsigned long long)h, (unsigned)n);
+}

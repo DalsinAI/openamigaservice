@@ -16,6 +16,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 #include <pthread.h>
@@ -130,7 +131,8 @@ static int sound_open(struct sound *s, const uint8_t *d, uint32_t n, uint32_t ma
         avcodec_open2(s->dec, codec, NULL) < 0 || s->dec->sample_rate <= 0 || s->dec->ch_layout.nb_channels <= 0)
         return MD_BADREQUEST;
 
-    s->format = fourcc(codec->id);
+    s->format = !strcmp(s->fmt->iformat->name, "libopenmpt") ? MD_FORMAT_MODULE
+              : !strcmp(s->fmt->iformat->name, "libgme") ? MD_FORMAT_CHIPTUNE : fourcc(codec->id);
     s->channels = s->dec->ch_layout.nb_channels;
     if (maxch && s->channels > maxch)
         s->channels = maxch;
@@ -271,22 +273,153 @@ int md_sound_decode(const struct md_buffer *file, uint32_t first, const uint32_t
 }
 
 /* 1 when FFmpeg recognises the file's first bytes. */
-int md_is_av(const uint8_t *d, uint32_t n)
+static const AVInputFormat *probe(const uint8_t *d, uint32_t n)
 {
+    const AVInputFormat *f;
     AVProbeData pd = { 0 };
     uint8_t *buf;
     int score = 0;
 
+    av_log_set_level(AV_LOG_ERROR);
     n = n > 65536 ? 65536 : n;
     if (!(buf = av_mallocz(n + AVPROBE_PADDING_SIZE)))
-        return 0;
+        return NULL;
     memcpy(buf, d, n);
     pd.filename = "";
     pd.buf = buf;
     pd.buf_size = n;
-    av_probe_input_format3(&pd, 1, &score);
+    f = av_probe_input_format3(&pd, 1, &score);
     av_free(buf);
-    return score >= AVPROBE_SCORE_MAX / 4;
+    return score >= AVPROBE_SCORE_MAX / 4 ? f : NULL;
+}
+
+/* A still picture: one of FFmpeg's piped image readers (jpegxl_pipe, ...). */
+static int is_still(const AVInputFormat *f)
+{
+    size_t len = strlen(f->name);
+    /* GIF and APNG answer PROBE and DECODE with their first frame. */
+    return (len > 5 && !strcmp(f->name + len - 5, "_pipe")) || !strcmp(f->name, "gif") || !strcmp(f->name, "apng");
+}
+
+int md_is_av(const uint8_t *d, uint32_t n)
+{
+    const AVInputFormat *f = probe(d, n);
+    return !f ? MD_AV_NONE : is_still(f) ? MD_AV_STILL : MD_AV_MEDIA;
+}
+
+/* ---- still pictures ------------------------------------------------------ */
+
+static uint32_t still_fourcc(const char *name)
+{
+    static const struct { const char *name; uint32_t fourcc; } map[] = {
+        { "jpeg_pipe", MD_FORMAT_JPEG }, { "png_pipe", MD_FORMAT_PNG }, { "gif_pipe", MD_FORMAT_GIF }, { "gif", MD_FORMAT_GIF },
+        { "apng", MD_FORMAT_PNG },
+        { "jpegxl_pipe", MD_FORMAT_JXL }, { "exr_pipe", MD_FORMAT_EXR }, { "hdr_pipe", MD_FORMAT_HDR },
+        { "psd_pipe", MD_FORMAT_PSD }, { "qoi_pipe", MD_FORMAT_QOI }, { "dds_pipe", MD_FORMAT_DDS },
+        { "j2k_pipe", MD_FORMAT_J2K }, { "tiff_pipe", MD_FORMAT_TIFF }, { "webp_pipe", MD_FORMAT_WEBP },
+        { "dpx_pipe", MD_FORMAT_DPX }, { "pcx_pipe", MD_FORMAT_PCX }, { "sgi_pipe", MD_FORMAT_SGI },
+    };
+    size_t i;
+    for (i = 0; i < sizeof map / sizeof map[0]; i++)
+        if (!strcmp(name, map[i].name))
+            return map[i].fourcc;
+    return MD_FORMAT_STILL;
+}
+
+int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, uint32_t *flags,
+                  uint32_t *width, uint32_t *height, uint8_t **argb)
+{
+    const AVInputFormat *f = probe(d, n);
+    struct mem mem = { d, n, 0 };
+    AVIOContext *io = NULL;
+    AVFormatContext *fmt = NULL;
+    AVCodecContext *dec = NULL;
+    const AVCodec *codec;
+    AVPacket *pkt = NULL;
+    AVFrame *frame = NULL;
+    struct SwsContext *sws = NULL;
+    uint8_t *iobuf;
+    int st = MD_BADREQUEST, stream, got = 0;
+
+    *argb = NULL;
+    if (!f || !is_still(f))
+        return MD_BADREQUEST;
+    if (!(iobuf = av_malloc(65536)))
+        return MD_HOSTERROR;
+    if (!(io = avio_alloc_context(iobuf, 65536, 0, &mem, mem_read, NULL, mem_seek))) {
+        av_free(iobuf);
+        return MD_HOSTERROR;
+    }
+    if (!(fmt = avformat_alloc_context()))
+        goto out;
+    fmt->pb = io;
+    if (avformat_open_input(&fmt, NULL, f, NULL) < 0)
+        goto out;
+    /* No avformat_find_stream_info: it decodes the picture once just to look. */
+    if ((stream = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0)) < 0)
+        goto out;
+    if (!(dec = avcodec_alloc_context3(codec))
+        || avcodec_parameters_to_context(dec, fmt->streams[stream]->codecpar) < 0
+        || avcodec_open2(dec, codec, NULL) < 0)
+        goto out;
+    *format = still_fourcc(f->name);
+    *flags = 0;
+    *width = dec->width;
+    *height = dec->height;
+    if (!decode && *width && *height) {
+        const AVPixFmtDescriptor *pd = av_pix_fmt_desc_get(dec->pix_fmt);
+        if (pd && (pd->flags & AV_PIX_FMT_FLAG_ALPHA))
+            *flags = MD_FLAG_ALPHA;
+        st = MD_OK;
+        goto out;
+    }
+    if (!(pkt = av_packet_alloc()) || !(frame = av_frame_alloc()))
+        goto out;
+    while (!got && av_read_frame(fmt, pkt) >= 0) {
+        if (pkt->stream_index == stream && avcodec_send_packet(dec, pkt) >= 0)
+            got = avcodec_receive_frame(dec, frame) >= 0;
+        av_packet_unref(pkt);
+    }
+    if (!got && avcodec_send_packet(dec, NULL) >= 0)
+        got = avcodec_receive_frame(dec, frame) >= 0;
+    if (!got || frame->width <= 0 || frame->height <= 0
+        || (uint64_t)frame->width * frame->height > (1u << 28))
+        goto out;
+    {
+        const AVPixFmtDescriptor *pd = av_pix_fmt_desc_get(frame->format);
+        int stride = frame->width * 4;
+        *width = frame->width;
+        *height = frame->height;
+        *flags = pd && (pd->flags & AV_PIX_FMT_FLAG_ALPHA) ? MD_FLAG_ALPHA : 0;
+        if (!decode) {
+            st = MD_OK;
+            goto out;
+        }
+        if (!(sws = sws_getContext(frame->width, frame->height, frame->format, frame->width, frame->height,
+                                   AV_PIX_FMT_ARGB, SWS_POINT, NULL, NULL, NULL))
+            || !(*argb = malloc((size_t)stride * frame->height))) {
+            st = MD_HOSTERROR;
+            goto out;
+        }
+        sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize, 0, frame->height, argb, &stride);
+        if (!*flags) {
+            size_t i, px = (size_t)frame->width * frame->height;
+            for (i = 0; i < px; i++)
+                (*argb)[i * 4] = 255;
+        }
+        st = MD_OK;
+    }
+out:
+    sws_freeContext(sws);
+    av_frame_free(&frame);
+    av_packet_free(&pkt);
+    avcodec_free_context(&dec);
+    avformat_close_input(&fmt);
+    if (io) {
+        av_freep(&io->buffer);
+        avio_context_free(&io);
+    }
+    return st;
 }
 
 /* ---- video --------------------------------------------------------------- */

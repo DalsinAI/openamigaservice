@@ -3,10 +3,15 @@
 Decodes pictures and sounds for an Amiga's datatypes: the Amiga sends the
 file, the host answers with 32-bit ARGB pixels scaled down to fit, or 16-bit
 PCM at the rate and channels the Amiga can play. Host code:
-`host/media_decode.c` for AVIF (libavif) and HEIC/HEIF (libheif), and
-`host/media_av.c` for any sound FFmpeg reads (FLAC, Ogg Vorbis, Opus, MP3,
-AAC, ALAC, WMA and more) and any video it reads (H.264, HEVC, AV1, VP8/VP9,
-MPEG-4, MPEG-1/2, WMV, MJPEG, Theora).
+`host/media_decode.c` for AVIF (libavif) and HEIC/HEIF (libheif);
+`host/media_av.c` for pictures FFmpeg reads (JPEG, PNG, GIF, WebP, JPEG XL,
+QOI, EXR, HDR, TIFF, DDS, JPEG 2000...), any sound it reads (FLAC, Ogg
+Vorbis, Opus, MP3, AAC, ALAC, WMA, tracker modules through libopenmpt, and
+more) and any video it reads (H.264, HEVC, AV1, VP8/VP9, MPEG-4, MPEG-1/2,
+WMV, MJPEG, Theora); and `host/media_tool.c` for what host tools do better:
+camera RAW (LibRaw's `dcraw_emu`, else `dcraw`), every other picture
+ImageMagick reads (PSD, XCF, TGA, PCX, ...), MIDI (FluidSynth) and SID
+tunes (sidplayfp).
 
 The Amiga side is openamigaimage's datatypes (`heif.datatype`,
 `opensound.datatype`, `openvideo.datatype`, and `webm.datatype` for its
@@ -16,12 +21,29 @@ a Cradle, so the decoded pixels come back whole.
 
 | Op | Name | Request | Answer |
 | --- | --- | --- | --- |
-| 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest width and height wanted (0: any); buf1 (out) 24 bytes of info | result width, aux height (the picture's own) |
-| 2 | DECODE | `arg` the frame (0 the first); buf0 the file; `extra[0]`, `extra[1]` as PROBE; buf1 (out) the pixels | result width, aux height (of the pixels written) |
+| 1 | PROBE | buf0 the file; `extra[0]`, `extra[1]` the largest width and height wanted (0: any); `extra[2]` the file's extension as a hint (0: none); buf1 (out) 24 bytes of info | result width, aux height (the picture's own) |
+| 2 | DECODE | `arg` the frame (0 the first); buf0 the file; `extra[0..2]` as PROBE; buf1 (out) the pixels | result width, aux height (of the pixels written) |
 
-PROBE's info, six big-endian u32s: kind (1 picture), format (`'AVIF'` or
-`'HEIC'`), flags (bit 0: alpha), frames, then the width and height DECODE
-will write for the same `extra[0]` and `extra[1]`.
+PROBE's info, six big-endian u32s: kind (1 picture), format, flags (bit 0:
+alpha), frames, then the width and height DECODE will write for the same
+`extra[0]` and `extra[1]`. Formats: `'AVIF'`, `'HEIC'`, `'JPEG'`, `'PNG '`,
+`'GIF '`, `'WEBP'`, `'JXL '`, `'EXR '`, `'HDR '`, `'PSD '`, `'QOI '`,
+`'DDS '`, `'J2K '`, `'TIFF'`, `'DPX '`, `'PCX '`, `'SGI '`, `'STIL'` (another
+picture FFmpeg reads), `'RAW '` (camera RAW), or for ImageMagick the hint in
+capitals (`'TGA '`), else `'IMGK'`.
+
+Full size: `extra[0]` = `extra[1]` = 0 gives the picture at its own size,
+for a browser that lays out and scales pictures itself. On the Cradle a
+320x240 JPEG or WebP takes about 1.5 ms, a PNG about 5 ms, before the trip.
+
+The hint is the extension in up to four ASCII letters, big-endian and
+space-padded (`'CR2 '`, `'TGA '`). Pictures are recognised by their bytes
+first; the hint matters for formats with no signature (TGA) and sends
+camera RAW, which is TIFF inside, to LibRaw. GIF and APNG answer with their
+first frame. Pictures through ImageMagick or LibRaw are converted once and
+kept in the cache (`$OPENSERVICE_CACHE/picture`, else
+`~/.cache/openservice/picture`), so a PROBE then a DECODE costs one
+conversion. EXIF rotation is not applied (as the Amiga's own JPEG datatype).
 
 DECODE's pixels are rows of 4-byte A, R, G, B, no padding: width x height x
 4 bytes, the layout picture.datatype's `PBPAFMT_ARGB` takes. A picture that
@@ -39,7 +61,12 @@ applied; in AVIF files not yet.
 ## Sounds
 
 A file that is not one of the pictures above and that FFmpeg recognises is
-taken as a sound (its best audio stream).
+taken as a sound (its best audio stream). MIDI files (`MThd`, or RIFF
+`RMID`) are played through FluidSynth with `$OPENSERVICE_SOUNDFONT`, else
+the General MIDI font in `/usr/share/sounds/sf2`; SID tunes (`PSID`,
+`RSID`) through sidplayfp for `$OPENSERVICE_SIDSECONDS` (default 180), as
+SID tunes never end. Both are rendered once to a WAV in the cache
+(`.../sound`), then answered as below.
 
 | Op | Request | Answer |
 | --- | --- | --- |
@@ -47,7 +74,9 @@ taken as a sound (its best audio stream).
 | DECODE | `arg` the first sample frame; buf0 the file; `extra` as PROBE; buf1 (out) the samples | result the sample frames written, aux the rate |
 
 PROBE's info for a sound: kind (3 sound), format (`'FLAC'`, `'VORB'`,
-`'OPUS'`, `'MP3 '`, `'AAC '`, `'ALAC'`, `'WMA '`, or `'SOUN'` for another),
+`'OPUS'`, `'MP3 '`, `'AAC '`, `'ALAC'`, `'WMA '`, `'MOD '` for tracker
+modules, `'GME '` for console tunes through Game Music Emu, `'MIDI'`,
+`'SID '`, or `'SOUN'` for another),
 flags (0), sample frames, rate, channels.
 
 The rate is the file's, halved until it is at most `extra[1]` (44.1 kHz

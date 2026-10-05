@@ -24,7 +24,8 @@ Programs ask by name and do not know where the work runs:
 | `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
 | `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice (docs/DOC_RENDER.md) |
-| `host/media_decode.c`, `host/media_av.c` | `media.decode/1` on the host: AVIF and HEIC pictures, and sounds through FFmpeg, for openamigaimage's datatypes (docs/MEDIA_DECODE.md) |
+| `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
+| `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for openamigaimage's datatypes (docs/MEDIA_DECODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
 
 The board's registers and rings, and the LAN framing, are in the AmigaChrome
@@ -60,6 +61,10 @@ libavif and libheif with libheif's HEVC decoder plugin for `media.decode/1`
 and FFmpeg's libraries for its sounds (on Ubuntu: `libavif-dev libheif-dev
 libheif-plugin-libde265 libavformat-dev libavcodec-dev libswresample-dev`).
 Without the HEVC plugin HEIC files are refused; without FFmpeg, sounds are.
+The rest of `media.decode/1`'s formats need tools at run time only:
+`imagemagick` for PSD, XCF, TGA and other pictures, `libraw-bin` for camera
+RAW, `fluidsynth` with `fluid-soundfont-gm` for MIDI, and `sidplayfp` for
+SID tunes; a missing tool just means that format is refused.
 `doc.render/1` runs LibreOffice (`libreoffice-writer`, `-calc`,
 `-impress`) and poppler's tools (`poppler-utils`). `host/test_*.py` check
 each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and

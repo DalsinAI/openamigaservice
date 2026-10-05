@@ -106,44 +106,6 @@ static const char *extension(uint32_t f)
     }
 }
 
-/* ---- the cache ---------------------------------------------------------- */
-
-static int cache_dir(char *out, size_t room)
-{
-    const char *base = getenv("OPENSERVICE_CACHE");
-    char tmp[512];
-
-    if (base)
-        snprintf(out, room, "%s/doc", base);
-    else if ((base = getenv("XDG_CACHE_HOME")) && *base)
-        snprintf(out, room, "%s/openservice/doc", base);
-    else if ((base = getenv("HOME")) && *base)
-        snprintf(out, room, "%s/.cache/openservice/doc", base);
-    else
-        snprintf(out, room, "/tmp/openservice-doc-%u", (unsigned)getuid());
-    /* mkdir -p */
-    snprintf(tmp, sizeof tmp, "%s", out);
-    for (char *p = tmp + 1; *p; p++)
-        if (*p == '/') {
-            *p = 0;
-            mkdir(tmp, 0700);
-            *p = '/';
-        }
-    return mkdir(tmp, 0700) == 0 || errno == EEXIST ? 0 : -1;
-}
-
-/* FNV-1a 64 of the bytes, and their length: the cache key. */
-static void key(const uint8_t *d, uint32_t n, char *out, size_t room)
-{
-    uint64_t h = 1469598103934665603ULL;
-    uint32_t i;
-    for (i = 0; i < n; i++) {
-        h ^= d[i];
-        h *= 1099511628211ULL;
-    }
-    snprintf(out, room, "%016llx-%u", (unsigned long long)h, (unsigned)n);
-}
-
 /* The document as a PDF in the cache (path into pdf); 0 on success. */
 static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size_t room)
 {
@@ -152,9 +114,9 @@ static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size
     FILE *f;
     int rc = -1;
 
-    if (cache_dir(dir, sizeof dir))
+    if (hr_cache_dir("doc", dir, sizeof dir))
         return -1;
-    key(d, n, k, sizeof k);
+    hr_key(d, n, k, sizeof k);
     snprintf(pdf, room, "%s/%s.pdf", dir, k);
     if (stat(pdf, &sb) == 0 && sb.st_size > 0)
         return 0;

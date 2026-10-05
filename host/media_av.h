@@ -8,8 +8,15 @@
 #include <stdint.h>
 #include "media_decode.h"
 
-/* 1 when FFmpeg recognises the file. */
+/* What FFmpeg makes of the file. */
+#define MD_AV_NONE  0
+#define MD_AV_STILL 1     /* a still picture (JPEG XL, EXR, PSD, ...) */
+#define MD_AV_MEDIA 2     /* a sound or a video */
 int md_is_av(const uint8_t *d, uint32_t n);
+/* A still picture's first image, full size, as ARGB (malloc'd) when decode;
+ * just its format, flags and size otherwise. */
+int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, uint32_t *flags,
+                  uint32_t *width, uint32_t *height, uint8_t **argb);
 /* PROBE and DECODE for a sound: extra[0] most channels, extra[1] highest rate. */
 int md_sound_probe(const struct md_buffer *file, const uint32_t extra[4], uint8_t info[MD_INFO_SIZE],
                    uint32_t *result, uint32_t *aux);

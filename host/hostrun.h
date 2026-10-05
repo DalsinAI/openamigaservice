@@ -22,4 +22,11 @@ int hr_write(const char *path, const uint8_t *d, uint32_t n);
 /* Reads a whole file, malloc'd; NULL on failure. */
 uint8_t *hr_read(const char *path, size_t *len);
 
+/* The cache directory for one kind of result ($OPENSERVICE_CACHE/kind, else
+ * $XDG_CACHE_HOME/openservice/kind, else ~/.cache/openservice/kind), made
+ * when missing; 0 on success. */
+int hr_cache_dir(const char *kind, char *out, size_t room);
+/* The cache key for some bytes: FNV-1a 64 and the length. */
+void hr_key(const uint8_t *d, uint32_t n, char *out, size_t room);
+
 #endif
