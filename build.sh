@@ -21,8 +21,14 @@ done
 if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
 fi
-# media.decode/1 (libavif, and libheif with its HEVC decoder plugin)
-if [ -f /usr/include/avif/avif.h ] && [ -f /usr/include/libheif/heif.h ]; then
-    gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c -lavif -lheif
+# media.decode/1: pictures with libavif, and libheif with its HEVC decoder
+# plugin; sounds with FFmpeg when its headers are there.
+if pkg-config --exists libavif libheif 2>/dev/null; then
+    if pkg-config --exists libavformat libavcodec libswresample libavutil 2>/dev/null; then
+        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c \
+            $(pkg-config --cflags --libs libavif libheif libavformat libavcodec libswresample libavutil)
+    else
+        gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c $(pkg-config --cflags --libs libavif libheif)
+    fi
 fi
 ls -l bin

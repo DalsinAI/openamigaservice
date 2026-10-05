@@ -1,6 +1,7 @@
 /*
  * media.decode/1 on the host (docs/MEDIA_DECODE.md): AVIF through libavif,
- * HEIC/HEIF through libheif, answered as 32-bit ARGB scaled to fit.
+ * HEIC/HEIF through libheif, answered as 32-bit ARGB scaled to fit; sounds
+ * through FFmpeg (media_av.c) when built with MD_AV.
  * MIT, Copyright (c) 2026 Dalsin Limited.
  */
 #include "media_decode.h"
@@ -11,6 +12,10 @@
 #include <avif/avif.h>
 #include <libheif/heif.h>
 
+#ifdef MD_AV
+#include "media_av.h"
+#endif
+
 /* Larger pictures are refused: 2^28 pixels is 1 GB of ARGB. */
 #define MAX_PIXELS (1u << 28)
 
@@ -20,7 +25,7 @@ struct picture {
     uint8_t *argb;             /* width x height x 4, malloc'd; NULL after a probe */
 };
 
-static void put32(uint8_t *p, uint32_t v)
+void md_put32(uint8_t *p, uint32_t v)
 {
     p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
 }
@@ -254,6 +259,19 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
     int st;
 
     *result = *aux = 0;
+#ifdef MD_AV
+    /* Not a picture this file knows: a sound (later video) through FFmpeg. */
+    if ((op == MD_PROBE || op == MD_DECODE) && buf[0].in && buf[0].length
+        && !sniff(buf[0].in, buf[0].length) && md_is_av(buf[0].in, buf[0].length)) {
+        if (op == MD_DECODE)
+            return buf[1].out ? md_sound_decode(&buf[0], arg, extra, &buf[1], result, aux) : MD_TOOSMALL;
+        if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
+            return MD_TOOSMALL;
+        if ((st = md_sound_probe(&buf[0], extra, buf[1].out, result, aux)) == MD_OK)
+            buf[1].written = MD_INFO_SIZE;
+        return st;
+    }
+#endif
     switch (op) {
     case MD_PROBE:
         if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
@@ -261,12 +279,12 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
         if ((st = load(&buf[0], 0, 0, &p)) != MD_OK)
             return st;
         md_fit(p.width, p.height, extra[0], extra[1], &ow, &oh);
-        put32(buf[1].out, MD_KIND_PICTURE);
-        put32(buf[1].out + 4, p.format);
-        put32(buf[1].out + 8, p.flags);
-        put32(buf[1].out + 12, p.frames);
-        put32(buf[1].out + 16, ow);
-        put32(buf[1].out + 20, oh);
+        md_put32(buf[1].out, MD_KIND_PICTURE);
+        md_put32(buf[1].out + 4, p.format);
+        md_put32(buf[1].out + 8, p.flags);
+        md_put32(buf[1].out + 12, p.frames);
+        md_put32(buf[1].out + 16, ow);
+        md_put32(buf[1].out + 20, oh);
         buf[1].written = MD_INFO_SIZE;
         *result = p.width;
         *aux = p.height;
