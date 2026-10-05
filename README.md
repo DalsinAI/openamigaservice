@@ -7,7 +7,7 @@ its Amiga side, the `Nursery` command that lists what is there, and the
 Cradle-side services.
 
 `openservice.device` hands work from an Amiga to a named service, such as
-`opentls.key/1` for TLS key maths, and later media decoding for datatypes.
+`opentls.key/1` for TLS key maths, and `media.decode/1` for datatypes.
 Programs ask by name and do not know where the work runs:
 
 - **On a board in this machine.** Every Dalsin AutoConfig board with the
@@ -27,8 +27,11 @@ Programs ask by name and do not know where the work runs:
 | `src/mdns.c` | One mDNS question for `_amigachrome._tcp.local` |
 | `src/nursery.c` | `Nursery`: lists the boards and the Cradles on the LAN, and their services |
 | `src/servicetest.c` | `ServiceTest`: open, list and `echo/1` calls, checked and timed |
-| `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1` and `opentls.key/1` |
+| `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
+| `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice (docs/DOC_RENDER.md) |
+| `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
+| `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for openamigaimage's datatypes (docs/MEDIA_DECODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
 
 The board's registers and rings, and the LAN framing, are in the AmigaChrome
@@ -58,6 +61,21 @@ encrypted yet; that comes with pairing by code.
 
 `./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`). Install
 `openservice.device` in `DEVS:`.
+
+The host side needs, on the Cradle: OpenSSL 3 for `opentls.key/1`, and
+libavif and libheif with libheif's HEVC decoder plugin for `media.decode/1`
+and FFmpeg's libraries for its sounds (on Ubuntu: `libavif-dev libheif-dev
+libheif-plugin-libde265 libavformat-dev libavcodec-dev libswresample-dev`).
+Without the HEVC plugin HEIC files are refused; without FFmpeg, sounds are.
+The rest of `media.decode/1`'s formats need tools at run time only:
+`imagemagick` for PSD, XCF, TGA and other pictures, `libraw-bin` for camera
+RAW, `fluidsynth` with `fluid-soundfont-gm` for MIDI, and `sidplayfp` for
+SID tunes; a missing tool just means that format is refused.
+`doc.render/1` runs LibreOffice (`libreoffice-writer`, `-calc`,
+`-impress`) and poppler's tools (`poppler-utils`), with `ghostscript` for
+PostScript and `pandoc` for EPUB and Markdown. `host/test_*.py` check
+each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and
+LibreOffice.
 
 Measured on AmigaOS 3.2.3 (AmigaChrome, OpenSocket) against a Cradle on
 another PC: 500 `echo/1` calls, all correct, 2.2 ms each.

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds openservice.device, Nursery and ServiceTest for AmigaOS 3.x with the
-# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's TLS key library.
+# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's libraries: TLS keys, media decoding and documents.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmigaChrome/stoves/os32-gcc16)
 # MIT, Copyright (c) 2026 Dalsin Limited.
 set -e
@@ -21,4 +21,17 @@ done
 if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
 fi
+# media.decode/1: pictures with libavif, and libheif with its HEVC decoder
+# plugin; sounds, video and most pictures with FFmpeg when its headers are
+# there; RAW, ImageMagick, MIDI and SID through those tools at run time.
+if pkg-config --exists libavif libheif 2>/dev/null; then
+    if pkg-config --exists libavformat libavcodec libswresample libswscale libavutil 2>/dev/null; then
+        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c host/media_tool.c host/hostrun.c -lpthread -lz \
+            $(pkg-config --cflags --libs libavif libheif libavformat libavcodec libswresample libswscale libavutil)
+    else
+        gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_tool.c host/hostrun.c -lz $(pkg-config --cflags --libs libavif libheif)
+    fi
+fi
+# doc.render/1: needs LibreOffice and poppler's tools at run time only.
+gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread
 ls -l bin
