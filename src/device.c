@@ -75,77 +75,87 @@ static struct Task *starter;         /* waiting for the worker to start or stop 
 #define DIR_LIST   3
 #define OP_CANCEL  0xffff
 
-static volatile ULONG *card;          /* the board's registers */
-static UBYTE *ringMemory, *ring;      /* ring is ringMemory 4 KB aligned */
-static ULONG sqTail, cqHead;
-static struct Interrupt cardInterrupt;
+#define REG_CLASS    0x20
 
-#define RING_U32(off) (*(volatile ULONG *)(ring + (off)))
-#define SQ_TAIL RING_U32(0x000)
-#define SQ_HEAD RING_U32(0x040)
-#define CQ_TAIL RING_U32(0x080)
-#define CQ_HEAD RING_U32(0x0c0)
-#define SQ_ENTRY(i) (ring + 0x100 + ((i) & (RING_N - 1)) * 64)
-#define CQ_ENTRY(i) (ring + 0x100 + RING_N * 64 + ((i) & (RING_N - 1)) * 16)
+/* Every Dalsin board with the services block: the services card, CPU cores,
+ * FPU or TPU boards. Each has its own rings and interrupt server; the
+ * directory on each says what it offers. */
+#define MAX_BOARDS 4
+struct board {
+    volatile ULONG *regs;
+    UBYTE *memory, *ring;            /* ring is memory 4 KB aligned */
+    ULONG sqTail, cqHead;
+    struct Interrupt irq;
+};
+static struct board boards[MAX_BOARDS];
+static int boardCount;
 
-static ULONG cardServer(REG(a1, APTR data))
+#define RING_U32(b, off) (*(volatile ULONG *)((b)->ring + (off)))
+#define SQ_TAIL(b) RING_U32(b, 0x000)
+#define SQ_HEAD(b) RING_U32(b, 0x040)
+#define CQ_TAIL(b) RING_U32(b, 0x080)
+#define CQ_HEAD(b) RING_U32(b, 0x0c0)
+#define SQ_ENTRY(b, i) ((b)->ring + 0x100 + ((i) & (RING_N - 1)) * 64)
+#define CQ_ENTRY(b, i) ((b)->ring + 0x100 + RING_N * 64 + ((i) & (RING_N - 1)) * 16)
+
+static ULONG boardServer(REG(a1, struct board *b))
 {
-    (void)data;
-    if (card && (card[REG_INTREQ / 4] & 1)) {
-        card[REG_INTREQ / 4] = 1;   /* clear first: a later completion raises it again */
+    if (b->regs[REG_INTREQ / 4] & 1) {
+        b->regs[REG_INTREQ / 4] = 1;  /* clear first: a later completion raises it again */
         Signal(&worker->pr_Task, 1UL << cardSignal);
     }
-    return 0;                       /* the PORTS chain is shared: let the others look */
+    return 0;                         /* the PORTS chain is shared: let the others look */
 }
 
-static int cardStart(void)
+static void cardStart(void)
 {
     struct ConfigDev *cd = NULL;
-    static const UWORD makers[] = { OPENSERVICE_MANUFACTURER, OPENSERVICE_MANUFACTURER_OLD };
-    int i;
     ExpansionBase = (struct ExpansionBase *)OpenLibrary((CONST_STRPTR)"expansion.library", 37);
     if (!ExpansionBase)
-        return 0;
-    for (i = 0; i < 2 && !cd; i++)
-        cd = FindConfigDev(NULL, makers[i], OPENSERVICE_PRODUCT);
+        return;
+    while (boardCount < MAX_BOARDS && (cd = FindConfigDev(cd, OPENSERVICE_MANUFACTURER, -1))) {
+        volatile ULONG *regs = (volatile ULONG *)cd->cd_BoardAddr;
+        struct board *b = &boards[boardCount];
+        if ((cd->cd_Rom.er_Type & ERTF_MEMLIST) || (cd->cd_Flags & CDF_SHUTUP)
+            || regs[REG_MAGIC / 4] != OPENSERVICE_MAGIC || regs[REG_VERSION / 4] != 1)
+            continue;
+        b->memory = AllocMem(RING_BYTES + 4096, MEMF_FAST | MEMF_PUBLIC | MEMF_CLEAR);
+        if (!b->memory)
+            break;
+        b->ring = (UBYTE *)(((ULONG)b->memory + 4095) & ~4095UL);
+        b->regs = regs;
+        b->sqTail = b->cqHead = 0;
+        b->irq.is_Node.ln_Type = NT_INTERRUPT;
+        b->irq.is_Node.ln_Name = (char *)DevName;
+        b->irq.is_Data = b;
+        b->irq.is_Code = (void (*)(void))boardServer;
+        AddIntServer(INTB_PORTS, &b->irq);
+        CacheClearU();
+        regs[REG_ORDER / 4] = RING_ORDER;
+        regs[REG_RINGS / 4] = (ULONG)b->ring;
+        regs[REG_INTENA / 4] = 1;
+        boardCount++;
+    }
     CloseLibrary((struct Library *)ExpansionBase);
     ExpansionBase = NULL;
-    if (!cd || ((volatile ULONG *)cd->cd_BoardAddr)[REG_MAGIC / 4] != OPENSERVICE_MAGIC
-        || ((volatile ULONG *)cd->cd_BoardAddr)[REG_VERSION / 4] != 1)
-        return 0;
-    ringMemory = AllocMem(RING_BYTES + 4096, MEMF_FAST | MEMF_PUBLIC | MEMF_CLEAR);
-    if (!ringMemory)
-        return 0;
-    ring = (UBYTE *)(((ULONG)ringMemory + 4095) & ~4095UL);
-    card = (volatile ULONG *)cd->cd_BoardAddr;
-    sqTail = cqHead = 0;
-    cardInterrupt.is_Node.ln_Type = NT_INTERRUPT;
-    cardInterrupt.is_Node.ln_Name = (char *)DevName;
-    cardInterrupt.is_Code = (void (*)(void))cardServer;
-    AddIntServer(INTB_PORTS, &cardInterrupt);
-    CacheClearU();
-    card[REG_ORDER / 4] = RING_ORDER;
-    card[REG_RINGS / 4] = (ULONG)ring;
-    card[REG_INTENA / 4] = 1;
-    return 1;
 }
 
 static void cardStop(void)
 {
-    if (!card)
-        return;
-    card[REG_INTENA / 4] = 0;
-    card[REG_RINGS / 4] = 0;
-    RemIntServer(INTB_PORTS, &cardInterrupt);
-    FreeMem(ringMemory, RING_BYTES + 4096);
-    card = NULL;
-    ring = ringMemory = NULL;
+    while (boardCount) {
+        struct board *b = &boards[--boardCount];
+        b->regs[REG_INTENA / 4] = 0;
+        b->regs[REG_RINGS / 4] = 0;
+        RemIntServer(INTB_PORTS, &b->irq);
+        FreeMem(b->memory, RING_BYTES + 4096);
+        b->regs = NULL;
+    }
 }
 
 /* ---- what is in flight ---------------------------------------------------- */
 
 enum { WHERE_NONE, WHERE_CARD = OSWHERE_CARD, WHERE_LAN = OSWHERE_LAN };
-enum { KIND_USER, KIND_OPEN, KIND_INTERNAL };
+enum { KIND_USER, KIND_OPEN, KIND_LIST, KIND_INTERNAL };
 
 #define MAX_PENDING 64
 #define MAX_HANDLES 32
@@ -260,11 +270,12 @@ static void putEntry(UBYTE *e, ULONG id, UWORD service, UWORD op, const struct O
 
 static int cardSubmit(struct pending *p, UWORD service, UWORD op, const struct OSRequest *io, ULONG arg)
 {
+    struct board *b = &boards[p->conn];
     UBYTE *e;
     int i;
-    if (sqTail - SQ_HEAD >= RING_N)
+    if (b->sqTail - SQ_HEAD(b) >= RING_N)
         return 0;
-    e = SQ_ENTRY(sqTail);
+    e = SQ_ENTRY(b, b->sqTail);
     putEntry(e, p->id, service, op, io);
     if (!io)
         ((ULONG *)e)[3] = arg;
@@ -273,30 +284,36 @@ static int cardSubmit(struct pending *p, UWORD service, UWORD op, const struct O
             ULONG len = io->os_Buf[i].ob_Length;
             CachePreDMA(io->os_Buf[i].ob_Data, &len, io->os_Flags & (1UL << i) ? 0 : DMA_ReadFromRAM);
         }
-    SQ_TAIL = ++sqTail;
+    b->sqTail++;
+    SQ_TAIL(b) = b->sqTail;
     CacheClearU();
-    card[REG_DOORBELL / 4] = 1;
+    b->regs[REG_DOORBELL / 4] = 1;
     return 1;
 }
 
 static void completed(struct pending *p, LONG status, ULONG result, ULONG aux);
+static void listNext(struct OSRequest *io);
 
 static void cardDrain(void)
 {
-    ULONG tail;
+    int k;
     CacheClearU();
-    while (cqHead != (tail = CQ_TAIL)) {
-        while (cqHead != tail) {
-            ULONG *c = (ULONG *)CQ_ENTRY(cqHead);
-            struct pending *p = findPending(c[0]);
-            LONG status = (LONG)c[1];
-            ULONG result = c[2], aux = c[3];
-            cqHead++;
-            if (p)
-                completed(p, status, result, aux);
+    for (k = 0; k < boardCount; k++) {
+        struct board *b = &boards[k];
+        ULONG tail;
+        while (b->cqHead != (tail = CQ_TAIL(b))) {
+            while (b->cqHead != tail) {
+                ULONG *c = (ULONG *)CQ_ENTRY(b, b->cqHead);
+                struct pending *p = findPending(c[0]);
+                LONG status = (LONG)c[1];
+                ULONG result = c[2], aux = c[3];
+                b->cqHead++;
+                if (p && p->where == WHERE_CARD && p->conn == k)
+                    completed(p, status, result, aux);
+            }
+            CQ_HEAD(b) = b->cqHead;
+            CacheClearU();
         }
-        CQ_HEAD = cqHead;
-        CacheClearU();
     }
 }
 
@@ -484,6 +501,15 @@ static void completed(struct pending *p, LONG status, ULONG result, ULONG aux)
                 ULONG len = io->os_Buf[i].ob_Length;
                 CachePostDMA(io->os_Buf[i].ob_Data, &len, io->os_Flags & (1UL << i) ? 0 : DMA_ReadFromRAM);
             }
+    if (io && p->kind == KIND_LIST) {
+        p->id = 0;
+        p->io = NULL;
+        if (status == OSERR_OK)
+            io->os_Private[2] += result;
+        io->os_Private[3]++;
+        listNext(io);
+        return;
+    }
     if (io && p->kind == KIND_OPEN) {
         if (status == OSERR_OK) {
             for (i = 0; i < MAX_HANDLES && handles[i].where; i++)
@@ -498,8 +524,13 @@ static void completed(struct pending *p, LONG status, ULONG result, ULONG aux)
                     conns[p->conn].users++;
                 result = i + 1;
             }
+        } else if (status == OSERR_NOSERVICE && p->where == WHERE_CARD && p->conn + 1 < boardCount) {
+            /* Not on this board: ask the next. */
+            p->conn++;
+            if (cardSubmit(p, 0, DIR_OPEN, io, 0))
+                return;
         } else if (status == OSERR_NOSERVICE && p->where == WHERE_CARD) {
-            /* Not on the card: try the nursery. */
+            /* On no board: try the nursery. */
             int c = lanFor((const char *)io->os_Buf[0].ob_Data);
             p->where = WHERE_LAN;
             p->conn = (UBYTE)c;
@@ -544,7 +575,7 @@ static void doOpen(struct OSRequest *io)
     memcpy(name, io->os_Buf[0].ob_Data, n);
     name[n] = 0;
     io->os_Flags = 0;
-    if (card) {
+    if (boardCount) {
         p = newPending(io, KIND_OPEN, WHERE_CARD, 0);
         if (!p) {
             finish(io, OSERR_HOST, 0, 0);
@@ -589,24 +620,14 @@ static void doClose(struct OSRequest *io)
     finish(io, OSERR_OK, 0, 0);
 }
 
-static void doList(struct OSRequest *io)
+/* LIST asks each board in turn, each writing after the last (os_Private[2]
+ * holds the bytes so far, os_Private[3] the board), then the nursery. */
+static void listLan(struct OSRequest *io)
 {
-    struct pending *p;
-    io->os_Flags = 1;
-    if (card) {
-        p = newPending(io, KIND_USER, WHERE_CARD, 0);
-        if (p) {
-            submit(p, io, 0, DIR_LIST);
-            return;
-        }
-        finish(io, OSERR_HOST, 0, 0);
-        return;
-    }
-    {
-        /* No card: what the paired Cradles in the nursery offer. */
-        char *out = io->os_Buf[0].ob_Data;
-        ULONG room = io->os_Buf[0].ob_Length, used = 0;
-        int i;
+    char *out = io->os_Buf[0].ob_Data;
+    ULONG room = io->os_Buf[0].ob_Length, used = io->os_Private[2];
+    int i;
+    if (!boardCount) {                 /* the nursery only when nothing is local */
         lanFor("");
         for (i = 0; i < cradleCount; i++) {
             const char *s = cradles[i].services;
@@ -619,8 +640,42 @@ static void doList(struct OSRequest *io)
             if (used < room)
                 out[used++] = 0;
         }
-        finish(io, OSERR_OK, used, 0);
     }
+    finish(io, OSERR_OK, used, 0);
+}
+
+static void listNext(struct OSRequest *io)
+{
+    struct pending *p;
+    ULONG k = io->os_Private[3];
+    if (k >= (ULONG)boardCount) {
+        listLan(io);
+        return;
+    }
+    p = newPending(io, KIND_LIST, WHERE_CARD, (int)k);
+    if (!p) {
+        finish(io, OSERR_HOST, 0, 0);
+        return;
+    }
+    {
+        struct OSRequest part = *io;          /* the rest of the buffer */
+        part.os_Flags = 1;
+        part.os_Buf[0].ob_Data = (UBYTE *)io->os_Buf[0].ob_Data + io->os_Private[2];
+        part.os_Buf[0].ob_Length = io->os_Buf[0].ob_Length - io->os_Private[2];
+        if (!part.os_Buf[0].ob_Length || !cardSubmit(p, 0, DIR_LIST, &part, 0)) {
+            p->id = 0;
+            p->io = NULL;
+            listLan(io);
+        }
+    }
+}
+
+static void doList(struct OSRequest *io)
+{
+    io->os_Flags = 1;
+    io->os_Private[2] = 0;
+    io->os_Private[3] = 0;
+    listNext(io);
 }
 
 static void doCall(struct OSRequest *io)
@@ -764,7 +819,7 @@ static void workerMain(void)
             got = Wait(mask);
         if (got & 1UL << quitSignal)
             running = 0;
-        if (card && (got & 1UL << cardSignal)) {
+        if (boardCount && (got & 1UL << cardSignal)) {
             cardDrain();
             retryWaiting();
         }

@@ -6,8 +6,9 @@ LAN frames on TCP: each request is the services card's 64-byte entry, then
 the buffers the service reads; each answer is the 16-byte completion, then
 for each buffer the service writes a u32 byte count and the bytes.
 
-Services here: the directory (OPEN, CLOSE, LIST, CANCEL) and echo/1, which
-copies buffer 0 into buffer 1, as the emulator's test service does.
+Services here: the directory (OPEN, CLOSE, LIST, CANCEL), echo/1, which
+copies buffer 0 into buffer 1 as the emulator's test service does, and
+opentls.key/1 (host/opentls_key.c) when host/libopentlskey.so is built.
 
   nursery_host.py --fingerprint <fp>
 
@@ -33,6 +34,18 @@ def echo(op, arg, bufs, extra):
 
 
 SERVICES = {"echo/1": echo}
+
+try:                                                  # host/libopentlskey.so, when built
+    sys.path.insert(0, __import__("os").path.join(__import__("os").path.dirname(__file__), "..", "host"))
+    import opentls_key
+
+    def opentls(op, arg, bufs, extra, flags=0, lengths=(0, 0, 0, 0)):
+        status, result, aux, written = opentls_key.call(op, arg, extra, flags, bufs, lengths)
+        return status, result, aux, written
+
+    SERVICES["opentls.key/1"] = opentls
+except OSError:
+    pass
 
 
 class Connection(socketserver.BaseRequestHandler):
@@ -86,6 +99,8 @@ class Connection(socketserver.BaseRequestHandler):
                     names = b"".join(n.encode() + b"\0" for n in SERVICES)
                     written[0] = names
                     status, result, aux = OK, min(len(names), lengths[0]), 0
+                elif service in opened and opened[service] == "opentls.key/1":
+                    status, result, aux, written = SERVICES["opentls.key/1"](op, arg, bufs, extra, flags, lengths)
                 elif service in opened:
                     status, result, aux, written = SERVICES[opened[service]](op, arg, bufs, extra)
                 else:

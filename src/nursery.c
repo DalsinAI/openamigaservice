@@ -1,8 +1,9 @@
 /*
  * Nursery: lists the services this Amiga can hand work to.
  *
- * First the service card (an AutoConfig board, Dalsin $DA15): a virtual one
- * on AmigaChrome, on a PC or on our appliance, or a real one. Then any
+ * First the boards with the services block (Dalsin $DA15, any product): the
+ * services card, CPU cores, FPU or TPU boards, virtual ones on AmigaChrome on
+ * a PC or on our appliance, or real ones. Then any
  * Cradle on the LAN that offers services, found with one mDNS question for
  * _amigachrome._tcp.local. A Cradle lists what it offers in its TXT record:
  *   svc=opentls.key/1,media.decode/1
@@ -41,31 +42,36 @@ struct ExpansionBase *ExpansionBase;
 static struct mdns_cradle found[MAX_FOUND];
 static int foundCount;
 
-/* ---- the card ---- */
+/* ---- the boards ---- */
 
-static void listCard(void)
+static const char *className(ULONG c)
+{
+    switch (c) {
+    case OPENSERVICE_CLASS_SERVICES: return "services card";
+    case OPENSERVICE_CLASS_CORES: return "CPU cores";
+    case OPENSERVICE_CLASS_FPU: return "FPU";
+    case OPENSERVICE_CLASS_TPU: return "TPU";
+    }
+    return "board";
+}
+
+static void listBoards(void)
 {
     struct ConfigDev *cd = NULL;
     int any = 0;
-    static const UWORD makers[] = { OPENSERVICE_MANUFACTURER, OPENSERVICE_MANUFACTURER_OLD };
-    int i;
     ExpansionBase = (struct ExpansionBase *)OpenLibrary((CONST_STRPTR)"expansion.library", 37);
     if (!ExpansionBase)
         return;
-    for (i = 0; i < 2; i++) {
-        cd = NULL;
-        while ((cd = FindConfigDev(cd, makers[i], OPENSERVICE_PRODUCT))) {
-            const volatile ULONG *regs = (const volatile ULONG *)cd->cd_BoardAddr;
-            printf("Card:    service card at $%08lx", (unsigned long)cd->cd_BoardAddr);
-            if (regs[0] == OPENSERVICE_MAGIC)
-                printf(", version %lu%s\n", (unsigned long)regs[1], regs[7] & 1 ? ", services run on this machine's host" : "");
-            else
-                printf(", not answering\n");
-            any = 1;
-        }
+    while ((cd = FindConfigDev(cd, OPENSERVICE_MANUFACTURER, -1))) {
+        const volatile ULONG *regs = (const volatile ULONG *)cd->cd_BoardAddr;
+        if ((cd->cd_Rom.er_Type & ERTF_MEMLIST) || (cd->cd_Flags & CDF_SHUTUP) || regs[0] != OPENSERVICE_MAGIC)
+            continue;
+        printf("Board:   %s (product %u) at $%08lx, version %lu%s\n", className(regs[8]), cd->cd_Rom.er_Product,
+               (unsigned long)cd->cd_BoardAddr, (unsigned long)regs[1], regs[7] & 1 ? ", runs on this machine's host" : "");
+        any = 1;
     }
     if (!any)
-        printf("Card:    none\n");
+        printf("Board:   none\n");
     CloseLibrary((struct Library *)ExpansionBase);
 }
 
@@ -111,7 +117,7 @@ int main(void)
         seconds = (int)*(LONG *)args[0];
     if (seconds < 1)
         seconds = 1;
-    listCard();
+    listBoards();
     SocketBase = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
     if (!SocketBase)
         printf("LAN:     no network\n");
