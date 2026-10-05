@@ -39,6 +39,9 @@
 #define MD_FORMAT_STILL  0x5354494cu /* 'STIL': another picture FFmpeg reads */
 #define MD_FORMAT_RAW    0x52415720u /* 'RAW ': camera RAW, through LibRaw */
 #define MD_FORMAT_MAGICK 0x494d474bu /* 'IMGK': another picture ImageMagick reads (else the hint, 'TGA ') */
+#define MD_FORMAT_ORA    0x4f524120u /* 'ORA ': OpenRaster's flattened picture */
+#define MD_FORMAT_KRA    0x4b524120u /* 'KRA ': Krita's */
+#define MD_FORMAT_CBZ    0x43425a20u /* 'CBZ ': a comic book's first page */
 #define MD_FORMAT_MIDI   0x4d494449u /* 'MIDI', rendered by FluidSynth */
 #define MD_FORMAT_SID    0x53494420u /* 'SID ', rendered by sidplayfp */
 #define MD_FORMAT_MODULE 0x4d4f4420u /* 'MOD ': tracker modules, through libopenmpt */

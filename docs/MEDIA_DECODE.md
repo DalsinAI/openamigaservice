@@ -40,7 +40,9 @@ The hint is the extension in up to four ASCII letters, big-endian and
 space-padded (`'CR2 '`, `'TGA '`). Pictures are recognised by their bytes
 first; the hint matters for formats with no signature (TGA) and sends
 camera RAW, which is TIFF inside, to LibRaw. GIF and APNG answer with their
-first frame. Pictures through ImageMagick or LibRaw are converted once and
+first frame. OpenRaster (`'ORA '`) and Krita (`'KRA '`) files answer with
+their flattened picture, and a comic book (`'CBZ '`, only with the hint
+`'CBZ '`) with its first page by name. Pictures through ImageMagick or LibRaw are converted once and
 kept in the cache (`$OPENSERVICE_CACHE/picture`, else
 `~/.cache/openservice/picture`), so a PROBE then a DECODE costs one
 conversion. EXIF rotation is not applied (as the Amiga's own JPEG datatype).

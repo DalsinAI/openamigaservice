@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <zlib.h>
 
 /* Larger pictures are refused: 2^28 pixels is 1 GB of ARGB. */
 #define MAX_PIXELS (1u << 28)
@@ -60,6 +61,130 @@ int md_is_raw(const uint8_t *d, uint32_t n, const char *hint)
     }
     /* Canon CR3: ISO media with the crx brand. */
     return n >= 12 && !memcmp(d + 4, "ftypcrx ", 8);
+}
+
+/* ---- ZIP members ---------------------------------------------------------- */
+
+static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint32_t le16(const uint8_t *p) { return p[0] | p[1] << 8; }
+
+static int picture_name(const uint8_t *name, uint32_t len)
+{
+    static const char *const ext[] = { ".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".jxl", NULL };
+    const char *const *e;
+    for (e = ext; *e; e++) {
+        uint32_t el = strlen(*e), i;
+        if (len <= el)
+            continue;
+        for (i = 0; i < el && (name[len - el + i] | 0x20) == (*e)[i]; i++)
+            ;
+        if (i == el)
+            return 1;
+    }
+    return 0;
+}
+
+/* The central directory's entries, by name (want) or, with want NULL, the
+ * first picture by name order (a comic's first page). Gives the member's
+ * local header offset; 0 when found. */
+static int zip_find(const uint8_t *d, uint32_t n, const char *want, uint32_t *local)
+{
+    uint32_t i, eocd = 0, cd, entries, k, best_len = 0;
+    const uint8_t *best = NULL;
+
+    if (n < 22)
+        return -1;
+    for (i = n - 22; le32(d + i) != 0x06054b50; i--)     /* the end record, behind any comment */
+        if (i == 0 || n - i > 65557)
+            return -1;
+    eocd = i;
+    entries = le16(d + eocd + 10);
+    cd = le32(d + eocd + 16);
+    for (k = 0; k < entries; k++) {
+        uint32_t nl, el, cl;
+        if (cd + 46 > n || le32(d + cd) != 0x02014b50)
+            return -1;
+        nl = le16(d + cd + 28);
+        el = le16(d + cd + 30);
+        cl = le16(d + cd + 32);
+        if (cd + 46 + nl > n)
+            return -1;
+        if (want ? nl == strlen(want) && !memcmp(d + cd + 46, want, nl)
+                 : picture_name(d + cd + 46, nl)
+                   && (!best || memcmp(d + cd + 46, best + 46, nl < best_len ? nl : best_len) < 0
+                       || (!memcmp(d + cd + 46, best + 46, nl < best_len ? nl : best_len) && nl < best_len))) {
+            best = d + cd;
+            best_len = nl;
+            if (want)
+                break;
+        }
+        cd += 46 + nl + el + cl;
+    }
+    if (!best)
+        return -1;
+    *local = le32(best + 42);
+    return 0;
+}
+
+/* One member, stored or deflated, malloc'd. */
+static uint8_t *zip_member(const uint8_t *d, uint32_t n, uint32_t local, uint32_t *len)
+{
+    uint32_t method, csize, usize, start;
+    uint8_t *out;
+    z_stream z;
+
+    if (local + 30 > n || le32(d + local) != 0x04034b50)
+        return NULL;
+    method = le16(d + local + 8);
+    csize = le32(d + local + 18);
+    usize = le32(d + local + 22);
+    start = local + 30 + le16(d + local + 26) + le16(d + local + 28);
+    if ((le16(d + local + 6) & 8) || start > n || csize > n - start || usize > (1u << 28) || !usize)
+        return NULL;                                /* sizes after the data: not written by these programs */
+    if (!(out = malloc(usize)))
+        return NULL;
+    if (method == 0 && csize == usize) {
+        memcpy(out, d + start, usize);
+        *len = usize;
+        return out;
+    }
+    memset(&z, 0, sizeof z);
+    if (method != 8 || inflateInit2(&z, -15) != Z_OK) {
+        free(out);
+        return NULL;
+    }
+    z.next_in = (uint8_t *)d + start;
+    z.avail_in = csize;
+    z.next_out = out;
+    z.avail_out = usize;
+    if (inflate(&z, Z_FINISH) != Z_STREAM_END || z.total_out != usize) {
+        inflateEnd(&z);
+        free(out);
+        return NULL;
+    }
+    inflateEnd(&z);
+    *len = usize;
+    return out;
+}
+
+uint8_t *md_zip_picture(const uint8_t *d, uint32_t n, const char *hint, uint32_t *format, uint32_t *len)
+{
+    uint32_t local;
+
+    if (n < 58 || memcmp(d, "PK\3\4", 4))
+        return NULL;
+    /* OpenRaster and Krita: a mimetype first, and the flattened picture. */
+    if (!memcmp(d + 30, "mimetype", 8)
+        && (memmem(d + 38, n - 38 < 64 ? n - 38 : 64, "image/openraster", 16)
+            || memmem(d + 38, n - 38 < 64 ? n - 38 : 64, "application/x-krita", 19))) {
+        *format = memmem(d + 38, n - 38 < 64 ? n - 38 : 64, "krita", 5) ? MD_FORMAT_KRA : MD_FORMAT_ORA;
+        return zip_find(d, n, "mergedimage.png", &local) ? NULL : zip_member(d, n, local, len);
+    }
+    /* A comic book, named so (other ZIPs hold pictures too): its first page. */
+    if (strcmp(hint, "cbz"))
+        return NULL;
+    *format = MD_FORMAT_CBZ;
+    return zip_find(d, n, NULL, &local) ? NULL : zip_member(d, n, local, len);
 }
 
 /* ---- PNM and PAM --------------------------------------------------------- */

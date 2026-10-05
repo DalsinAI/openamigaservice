@@ -97,6 +97,31 @@ with tempfile.TemporaryDirectory() as tmp:
             assert call(DECODE, data, room=w * h * 4)[0] == 0
         print(f"{name}: {(time.perf_counter() - t) * 50:.2f} ms per full-size decode on the host")
 
+    # Pictures inside ZIPs: OpenRaster and Krita (their flattened picture), a comic's first page.
+    import zipfile
+    png = open(os.path.join(tmp, "g.png"), "rb").read()
+    for name, mime, fmt in (("g.ora", "image/openraster", "ORA "), ("g.kra", "application/x-krita", "KRA ")):
+        p = os.path.join(tmp, name)
+        with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(zipfile.ZipInfo("mimetype"), mime)
+            z.writestr("stack.xml", "<image/>")
+            z.writestr("mergedimage.png", png)
+        data = open(p, "rb").read()
+        st, pw, ph, out = call(PROBE, data, room=24)
+        assert st == 0 and struct.unpack(">6I", out[1])[1] == fourcc(fmt), (name, st)
+        st, dw, dh, out = call(DECODE, data, room=w * h * 4)
+        assert st == 0 and worst(rows, w, out[1]) == 0, (name, st)
+        print(f"{name}: {fmt} {dw}x{dh} from mergedimage.png")
+    p = os.path.join(tmp, "g.cbz")
+    with zipfile.ZipFile(p, "w") as z:
+        z.writestr("page02.jpg", b"not this one")
+        z.writestr("page01.png", png)
+    data = open(p, "rb").read()
+    st, pw, ph, out = call(PROBE, data, "cbz", room=24)
+    assert st == 0 and struct.unpack(">6I", out[1])[1] == fourcc("CBZ "), st
+    assert call(PROBE, data, room=24)[0] == -2                          # a ZIP not named a comic
+    print(f"g.cbz: CBZ {pw}x{ph}, the first page by name")
+
     # Camera RAW: a linear DNG, if tifffile can write one.
     try:
         import numpy as np

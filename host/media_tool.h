@@ -19,6 +19,10 @@ int md_is_raw(const uint8_t *d, uint32_t n, const char *hint);
 int md_tool_picture(const uint8_t *d, uint32_t n, const char *hint, int raw, uint32_t *format,
                     uint32_t *flags, uint32_t *width, uint32_t *height, uint8_t **argb);
 
+/* The picture inside a ZIP (malloc'd): OpenRaster's and Krita's flattened
+ * picture, or a comic book's first page (hint "cbz"); NULL when none. */
+uint8_t *md_zip_picture(const uint8_t *d, uint32_t n, const char *hint, uint32_t *format, uint32_t *len);
+
 /* 'MIDI' or 'SID ' when the bytes are a tune the host renders, else 0. */
 uint32_t md_tune_sniff(const uint8_t *d, uint32_t n);
 /* The tune rendered to a WAV file (malloc'd, cached); NULL on failure. */

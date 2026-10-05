@@ -254,6 +254,22 @@ static int load(const struct md_buffer *file, const char *hint, uint32_t frame, 
         return heif_load(file->in, file->length, frame, decode, p);
     }
     p->frames = 1;
+    /* A picture inside a ZIP: OpenRaster, Krita, a comic book. */
+    if (file->length >= 4 && !memcmp(file->in, "PK\3\4", 4)) {
+        struct md_buffer inner = { 0 };
+        uint32_t format = 0, len = 0;
+        uint8_t *pic = md_zip_picture(file->in, file->length, hint, &format, &len);
+        int st;
+        if (!pic)
+            return MD_BADREQUEST;
+        inner.in = pic;
+        inner.length = len;
+        st = load(&inner, "", frame, decode, p);
+        free(pic);
+        if (st == MD_OK)
+            p->format = format;
+        return st;
+    }
     /* Camera RAW is TIFF inside, so it goes to LibRaw before FFmpeg sees it. */
     if ((raw = md_is_raw(file->in, file->length, hint)))
         return md_tool_picture(file->in, file->length, hint, 1, &p->format, &p->flags, &p->width, &p->height, argb);
