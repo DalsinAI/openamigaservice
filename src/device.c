@@ -100,6 +100,10 @@ static int boardCount;
 #define SQ_ENTRY(b, i) ((b)->ring + 0x100 + ((i) & (RING_N - 1)) * 64)
 #define CQ_ENTRY(b, i) ((b)->ring + 0x100 + RING_N * 64 + ((i) & (RING_N - 1)) * 16)
 
+/* Only the data cache, and only the rings: CacheClearU also clears the
+ * instruction cache, which makes AC090 throw away its translated code. */
+#define RING_FLUSH(b) CacheClearE((b)->ring, RING_BYTES, CACRF_ClearD)
+
 static ULONG boardServer(REG(a1, struct board *b))
 {
     if (b->regs[REG_INTREQ / 4] & 1) {
@@ -132,7 +136,7 @@ static void cardStart(void)
         b->irq.is_Data = b;
         b->irq.is_Code = (void (*)(void))boardServer;
         AddIntServer(INTB_PORTS, &b->irq);
-        CacheClearU();
+        RING_FLUSH(b);
         regs[REG_ORDER / 4] = RING_ORDER;
         regs[REG_RINGS / 4] = (ULONG)b->ring;
         regs[REG_INTENA / 4] = 1;
@@ -281,14 +285,15 @@ static int cardSubmit(struct pending *p, UWORD service, UWORD op, const struct O
     putEntry(e, p->id, service, op, io);
     if (!io)
         ((ULONG *)e)[3] = arg;
+    /* The buffers out of the data cache before the host reads or writes
+     * them. Not CachePreDMA/CachePostDMA: on AC090 each pair costs about
+     * 250 ms, where this costs well under a millisecond. */
     for (i = 0; io && i < 4; i++)
-        if (io->os_Buf[i].ob_Length) {
-            ULONG len = io->os_Buf[i].ob_Length;
-            CachePreDMA(io->os_Buf[i].ob_Data, &len, io->os_Flags & (1UL << i) ? 0 : DMA_ReadFromRAM);
-        }
+        if (io->os_Buf[i].ob_Length)
+            CacheClearE(io->os_Buf[i].ob_Data, io->os_Buf[i].ob_Length, CACRF_ClearD);
     b->sqTail++;
     SQ_TAIL(b) = b->sqTail;
-    CacheClearU();
+    RING_FLUSH(b);
     b->regs[REG_DOORBELL / 4] = 1;
     return 1;
 }
@@ -299,10 +304,10 @@ static void listNext(struct OSRequest *io);
 static void cardDrain(void)
 {
     int k;
-    CacheClearU();
     for (k = 0; k < boardCount; k++) {
         struct board *b = &boards[k];
         ULONG tail;
+        RING_FLUSH(b);
         while (b->cqHead != (tail = CQ_TAIL(b))) {
             while (b->cqHead != tail) {
                 ULONG *c = (ULONG *)CQ_ENTRY(b, b->cqHead);
@@ -314,7 +319,7 @@ static void cardDrain(void)
                     completed(p, status, result, aux);
             }
             CQ_HEAD(b) = b->cqHead;
-            CacheClearU();
+            RING_FLUSH(b);
         }
     }
 }
@@ -506,10 +511,8 @@ static void completed(struct pending *p, LONG status, ULONG result, ULONG aux)
     int i;
     if (io && p->where == WHERE_CARD)
         for (i = 0; i < 4; i++)
-            if (io->os_Buf[i].ob_Length) {
-                ULONG len = io->os_Buf[i].ob_Length;
-                CachePostDMA(io->os_Buf[i].ob_Data, &len, io->os_Flags & (1UL << i) ? 0 : DMA_ReadFromRAM);
-            }
+            if (io->os_Buf[i].ob_Length && (io->os_Flags & (1UL << i)))
+                CacheClearE(io->os_Buf[i].ob_Data, io->os_Buf[i].ob_Length, CACRF_ClearD);
     if (io && p->kind == KIND_LIST) {
         p->id = 0;
         p->io = NULL;
