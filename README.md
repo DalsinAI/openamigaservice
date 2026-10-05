@@ -23,9 +23,23 @@ Programs ask by name and do not know where the work runs:
 | `src/servicetest.c` | `ServiceTest`: open, list and `echo/1` calls, checked and timed |
 | `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1` and `opentls.key/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
+| `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
 
 The board's registers and rings, and the LAN framing, are in the AmigaChrome
 project's `design/SERVICES_CARD.md` (v1); the emulator side is built there.
+
+## opentls
+
+A program using AmiSSL calls `opentls_amiga_open()` after opening AmiSSL.
+When a board or a paired Cradle offers `opentls.key/1`, every handshake's
+certificate checks, the server's handshake signature and the key exchange
+go there; TLS itself, and the bulk encryption, stay on the Amiga.
+`opentls/tlstest.c` runs the same provider on Linux against real sites:
+every handshake to example.com, login.live.com (TLS 1.2), github.com,
+wikipedia.org, google.com and others completes with all key work sent;
+bad certificates still fail, a service that says "bad" fails every
+handshake, and with no service the work is done locally.
+`opentls/tlsprobe.c` times handshakes on the Amiga through curl.
 
 ## Pairing
 

@@ -43,6 +43,9 @@ struct otk_buffer {
     uint32_t written;      /* out: bytes written */
 };
 
+/* Properties for OpenSSL fetches (default NULL). */
+extern const char *otk_propq;
+
 /* Runs one request. Returns the status; sets *result and *aux. */
 int otk_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct otk_buffer buf[4],
              uint32_t *result, uint32_t *aux);
