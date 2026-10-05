@@ -7,8 +7,9 @@ the buffers the service reads; each answer is the 16-byte completion, then
 for each buffer the service writes a u32 byte count and the bytes.
 
 Services here: the directory (OPEN, CLOSE, LIST, CANCEL), echo/1, which
-copies buffer 0 into buffer 1 as the emulator's test service does, and
-opentls.key/1 (host/opentls_key.c) when host/libopentlskey.so is built.
+copies buffer 0 into buffer 1 as the emulator's test service does,
+opentls.key/1 (host/opentls_key.c) when host/libopentlskey.so is built, and
+media.decode/1 (host/media_decode.c) when host/libmediadecode.so is built.
 
   nursery_host.py --fingerprint <fp>
 
@@ -46,6 +47,19 @@ try:                                                  # host/libopentlskey.so, w
     SERVICES["opentls.key/1"] = opentls
 except OSError:
     pass
+
+try:                                                  # host/libmediadecode.so, when built
+    import media_decode
+
+    def media(op, arg, bufs, extra, flags=0, lengths=(0, 0, 0, 0)):
+        return media_decode.call(op, arg, extra, flags, bufs, lengths)
+
+    SERVICES["media.decode/1"] = media
+except OSError:
+    pass
+
+# Services whose answers fill buffers the Amiga sized: they get the flags and room.
+SIZED = {"opentls.key/1", "media.decode/1"}
 
 
 class Connection(socketserver.BaseRequestHandler):
@@ -99,8 +113,8 @@ class Connection(socketserver.BaseRequestHandler):
                     names = b"".join(n.encode() + b"\0" for n in SERVICES)
                     written[0] = names
                     status, result, aux = OK, min(len(names), lengths[0]), 0
-                elif service in opened and opened[service] == "opentls.key/1":
-                    status, result, aux, written = SERVICES["opentls.key/1"](op, arg, bufs, extra, flags, lengths)
+                elif service in opened and opened[service] in SIZED:
+                    status, result, aux, written = SERVICES[opened[service]](op, arg, bufs, extra, flags, lengths)
                 elif service in opened:
                     status, result, aux, written = SERVICES[opened[service]](op, arg, bufs, extra)
                 else:

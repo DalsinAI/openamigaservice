@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds openservice.device, Nursery and ServiceTest for AmigaOS 3.x with the
-# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's TLS key library.
+# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's libraries: TLS keys, and media decoding.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmigaChrome/stoves/os32-gcc16)
 # MIT, Copyright (c) 2026 Dalsin Limited.
 set -e
@@ -20,5 +20,9 @@ done
 # The host side (Linux, OpenSSL 3), for the LAN Cradle and the emulator.
 if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
+fi
+# media.decode/1 (libavif, and libheif with its HEVC decoder plugin)
+if [ -f /usr/include/avif/avif.h ] && [ -f /usr/include/libheif/heif.h ]; then
+    gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c -lavif -lheif
 fi
 ls -l bin
