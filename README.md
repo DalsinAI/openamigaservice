@@ -1,4 +1,10 @@
-# openamigaservice
+# openamigaservice: Nursery
+
+**Nursery** is the whole system: `openservice.device` on the Amiga, the
+AutoConfig boards that carry services (the services card, CPU cores), the
+paired Cradles on the LAN, and the services they run. This repository holds
+its Amiga side, the `Nursery` command that lists what is there, and the
+Cradle-side services.
 
 `openservice.device` hands work from an Amiga to a named service, such as
 `opentls.key/1` for TLS key maths, and later media decoding for datatypes.
