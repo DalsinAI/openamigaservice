@@ -1,6 +1,6 @@
 /*
- * doc.render/1 on the host (docs/DOC_RENDER.md): LibreOffice turns the
- * document into a PDF once (kept in a cache by the file's hash), then
+ * doc.render/1 on the host (docs/DOC_RENDER.md): LibreOffice, or Apache
+ * OpenOffice through office_pdf.py, turns the document into a PDF once (kept in a cache by the file's hash), then
  * poppler's pdfinfo, pdftoppm and pdftotext answer for its pages and text.
  * MIT, Copyright (c) 2026 Dalsin Limited.
  */
@@ -8,7 +8,9 @@
 #include "doc_render.h"
 #include "hostrun.h"
 
+#include <dlfcn.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,8 +23,76 @@
 /* A page's own size, in pixels: 96 per inch. */
 #define DPI 96
 
-/* LibreOffice runs one conversion at a time per profile. */
+/* The office runs one conversion at a time per profile. */
 static pthread_mutex_t convert_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The office program: $OPENSERVICE_OFFICE (a soffice, LibreOffice's or
+ * OpenOffice's), else LibreOffice's soffice on the PATH, else OpenOffice in
+ * /opt. OpenOffice has no --convert-to, so its own Python runs office_pdf.py
+ * (beside this library) instead. */
+static struct {
+    char soffice[PATH_MAX];
+    char python[PATH_MAX + 16];   /* set for OpenOffice */
+    char script[PATH_MAX + 16];
+} office;
+static pthread_once_t office_once = PTHREAD_ONCE_INIT;
+
+static int executable(const char *path)
+{
+    return path[0] && access(path, X_OK) == 0;
+}
+
+static void find_office(void)
+{
+    const char *env = getenv("OPENSERVICE_OFFICE"), *path = getenv("PATH");
+    static const char *const opt[] = { "/opt/openoffice4/program/soffice", "/opt/openoffice.org3/program/soffice", NULL };
+    char real[PATH_MAX], *slash;
+    FILE *f;
+    Dl_info me;
+    int i;
+
+    if (env && executable(env))
+        snprintf(office.soffice, sizeof office.soffice, "%s", env);
+    while (!office.soffice[0] && path && *path) {
+        const char *end = strchr(path, ':');
+        size_t len = end ? (size_t)(end - path) : strlen(path);
+        char cand[PATH_MAX];
+        if (len && len < sizeof cand - 9) {
+            snprintf(cand, sizeof cand, "%.*s/soffice", (int)len, path);
+            if (executable(cand))
+                snprintf(office.soffice, sizeof office.soffice, "%s", cand);
+        }
+        path = end ? end + 1 : NULL;
+    }
+    for (i = 0; !office.soffice[0] && opt[i]; i++)
+        if (executable(opt[i]))
+            snprintf(office.soffice, sizeof office.soffice, "%s", opt[i]);
+    if (!office.soffice[0] || !realpath(office.soffice, real) || !(slash = strrchr(real, '/')))
+        return;
+    /* OpenOffice says so in program/versionrc; LibreOffice says LibreOffice. */
+    *slash = 0;
+    {
+        char rc[PATH_MAX + 16], line[256];
+        int aoo = 0;
+        snprintf(rc, sizeof rc, "%s/versionrc", real);
+        if ((f = fopen(rc, "r"))) {
+            while (fgets(line, sizeof line, f))
+                if (!strncmp(line, "ProductSource=AOO", 17) || !strncmp(line, "ProductSource=OOO", 17))
+                    aoo = 1;
+            fclose(f);
+        }
+        if (!aoo)
+            return;
+        snprintf(office.python, sizeof office.python, "%s/python", real);
+    }
+    if (dladdr((void *)find_office, &me) && me.dli_fname && realpath(me.dli_fname, real)
+        && (slash = strrchr(real, '/'))) {
+        *slash = 0;
+        snprintf(office.script, sizeof office.script, "%s/office_pdf.py", real);
+    }
+    if (!executable(office.python) || access(office.script, R_OK))
+        office.soffice[0] = 0;             /* OpenOffice without its Python or the script: none */
+}
 
 static void put32(uint8_t *p, uint32_t v)
 {
@@ -137,7 +207,7 @@ static const char *extension(uint32_t f)
 /* The document as a PDF in the cache (path into pdf); 0 on success. */
 static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size_t room)
 {
-    char dir[512], k[64], src[700], profile[600];
+    char dir[512], k[64], src[700], profile[640], profile_url[600];
     struct stat sb;
     FILE *f;
     int rc = -1;
@@ -168,8 +238,15 @@ static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size
         unlink(src);
         return rc == 0 && stat(pdf, &sb) == 0 && sb.st_size > 0 ? 0 : -1;
     }
-    if (format == FOURCC('E', 'P', 'U', 'B') || format == FOURCC('M', 'D', ' ', ' ')) {
-        /* pandoc reads e-books and Markdown; LibreOffice lays its DOCX out. */
+    pthread_once(&office_once, find_office);
+    if (!office.soffice[0]) {
+        unlink(src);
+        return -1;
+    }
+    if (format == FOURCC('E', 'P', 'U', 'B') || format == FOURCC('M', 'D', ' ', ' ')
+        || (format == FOURCC('H', 'T', 'M', 'L') && office.python[0])) {
+        /* pandoc reads e-books and Markdown (and HTML, which OpenOffice's
+         * importer mangles); the office lays its DOCX out. */
         char docx[700];
         char *argv[] = { "pandoc", src, "-o", docx, NULL };
         snprintf(docx, sizeof docx, "%s/%s.docx", dir, k);
@@ -179,18 +256,29 @@ static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size
             return -1;
         snprintf(src, sizeof src, "%s", docx);
     }
-    snprintf(profile, sizeof profile, "-env:UserInstallation=file://%s/profile", dir);
+    /* The two offices' profiles do not mix. */
+    snprintf(profile_url, sizeof profile_url, "file://%s/%s", dir, office.python[0] ? "profile-aoo" : "profile");
+    snprintf(profile, sizeof profile, "-env:UserInstallation=%s", profile_url);
     pthread_mutex_lock(&convert_lock);
     {
         /* CSV: comma (or tab), double quotes, UTF-8, from the first line. */
-        char *csv = format == FOURCC('T', 'S', 'V', ' ') ? "--infilter=CSV:9,34,76,1" : "--infilter=CSV:44,34,76,1";
-        char *argv[] = { "soffice", profile, "--headless", "--norestore", "--nolockcheck",
-                         "--convert-to", "pdf", "--outdir", dir, src, NULL, NULL };
-        if (format == FOURCC('C', 'S', 'V', ' ') || format == FOURCC('T', 'S', 'V', ' ')) {
-            memmove(&argv[5], &argv[4], 6 * sizeof argv[0]);
-            argv[4] = csv;
+        int sheet = format == FOURCC('C', 'S', 'V', ' ') || format == FOURCC('T', 'S', 'V', ' ');
+        char *options = format == FOURCC('T', 'S', 'V', ' ') ? "9,34,76,1" : "44,34,76,1";
+        if (office.python[0]) {
+            char *argv[] = { office.python, office.script, office.soffice, profile_url, src, pdf,
+                             sheet ? options : NULL, NULL };
+            rc = hr_run(argv, -1);
+        } else {
+            char csv[32];
+            char *argv[] = { office.soffice, profile, "--headless", "--norestore", "--nolockcheck",
+                             "--convert-to", "pdf", "--outdir", dir, src, NULL, NULL };
+            snprintf(csv, sizeof csv, "--infilter=CSV:%s", options);
+            if (sheet) {
+                memmove(&argv[5], &argv[4], 6 * sizeof argv[0]);
+                argv[4] = csv;
+            }
+            rc = hr_run(argv, -1);
         }
-        rc = hr_run(argv, -1);
     }
     pthread_mutex_unlock(&convert_lock);
     unlink(src);

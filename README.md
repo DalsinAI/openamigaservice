@@ -29,7 +29,7 @@ Programs ask by name and do not know where the work runs:
 | `src/servicetest.c` | `ServiceTest`: open, list and `echo/1` calls, checked and timed |
 | `cradle/` | A Cradle's side for the LAN: mDNS advertising, and a host for `echo/1`, `opentls.key/1`, `media.decode/1` and `doc.render/1` |
 | `host/opentls_key.c` | `opentls.key/1` on the host (docs/OPENTLS_KEY.md) |
-| `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice (docs/DOC_RENDER.md) |
+| `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice or Apache OpenOffice (docs/DOC_RENDER.md); `host/office_pdf.py` drives OpenOffice |
 | `host/cdxl.c`, `host/media_cdxl.py` | `media.cdxl/1`: any movie into CDXL for an ECS, AGA or RTG Amiga, as an option (docs/MEDIA_CDXL.md); `media_cdxl.py` does it from the Cradle's command line |
 | `src/tocdxl.c` | `ToCDXL`, the Amiga command for `media.cdxl/1` |
 | `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
@@ -74,7 +74,8 @@ The rest of `media.decode/1`'s formats need tools at run time only:
 RAW, `fluidsynth` with `fluid-soundfont-gm` for MIDI, `sidplayfp` for
 SID tunes, and `librsvg2-2` (on most desktops already) for SVG; a missing tool just means that format is refused.
 `doc.render/1` runs LibreOffice (`libreoffice-writer`, `-calc`,
-`-impress`) and poppler's tools (`poppler-utils`), with `ghostscript` for
+`-impress`), or Apache OpenOffice 4 (with its `pyuno` part) when that is
+what is installed, and poppler's tools (`poppler-utils`), with `ghostscript` for
 PostScript and `pandoc` for EPUB and Markdown. `host/test_*.py` check
 each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and
 LibreOffice.

@@ -1,7 +1,7 @@
 # doc.render/1
 
 Documents for an Amiga's datatypes. The host lays the document out with
-LibreOffice (PostScript with Ghostscript; EPUB and Markdown through pandoc
+LibreOffice or Apache OpenOffice (PostScript with Ghostscript; EPUB and Markdown through pandoc
 first), once per file (the PDF is kept in a cache under
 `~/.cache/openservice/doc`, or `$OPENSERVICE_CACHE/doc`, named by the
 file's hash), and answers with pictures of its pages, or its text. Host
@@ -37,6 +37,17 @@ Status: 0; -2 for a file that is not a document or that LibreOffice cannot
 open, or a page past the end; -4 for a buf1 too small; -5 when a host tool
 failed.
 
-The first request for a file takes about a second (LibreOffice starts and
+## The office
+
+`$OPENSERVICE_OFFICE` names the office's `soffice` (LibreOffice's or
+OpenOffice's); without it, LibreOffice's `soffice` on the `PATH`, else
+OpenOffice in `/opt/openoffice4`. OpenOffice is recognised by its
+`program/versionrc`; as it has no `--convert-to`, its own Python runs
+`host/office_pdf.py` (kept beside `libdocrender.so`), which starts it
+headless, opens the document over UNO and stores the PDF. HTML goes
+through pandoc first for OpenOffice, whose HTML import loses text. The two
+keep separate profiles in the cache. No office: office formats answer -2.
+
+The first request for a file takes about a second (the office starts and
 converts it); the ones after it come from the cache in tens of
 milliseconds.
