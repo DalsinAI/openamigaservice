@@ -90,7 +90,14 @@ int main(void)
     }
     /* Without PRESET: what this machine shows best without RTG. */
     preset = args[PRESET] ? preset_of((const char *)args[PRESET]) : aga() ? 2 : 0;
-    if (preset < 0 || (args[SIZE] && sscanf((const char *)args[SIZE], "%lux%lu", &w, &h) != 2)) {
+    if (args[SIZE]) {
+        unsigned long sw = 0, sh = 0;
+        if (sscanf((const char *)args[SIZE], "%lux%lu", &sw, &sh) != 2)
+            preset = -1;
+        w = (ULONG)sw;
+        h = (ULONG)sh;
+    }
+    if (preset < 0) {
         printf("ToCDXL: PRESET is ECS, ECSHAM, AGA, AGAHAM or RTG; SIZE is like 320x256\n");
         goto done;
     }

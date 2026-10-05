@@ -91,6 +91,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # JSC's case: the formats a web page carries, one request each, full size.
     for name in ("g.jpg", "g.png", "g.gif", "g.webp"):
+        if not os.path.exists(os.path.join(tmp, name)):   # its encoder is missing here
+            continue
         data = open(os.path.join(tmp, name), "rb").read()
         t = time.perf_counter()
         for _ in range(20):
