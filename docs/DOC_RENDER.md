@@ -33,9 +33,9 @@ media.decode/1's. TEXT is ISO-8859-1 with LF line ends, laid out in
 columns as on the page (pdftotext `-layout`); when buf1 is too small the
 status is -4 and result says the bytes needed.
 
-Status: 0; -2 for a file that is not a document or that LibreOffice cannot
+Status: 0; -2 for a file that is not a document or that the office cannot
 open, or a page past the end; -4 for a buf1 too small; -5 when a host tool
-failed.
+failed or no office is installed.
 
 ## The office
 
@@ -46,7 +46,7 @@ OpenOffice in `/opt/openoffice4`. OpenOffice is recognised by its
 `host/office_pdf.py` (kept beside `libdocrender.so`), which starts it
 headless, opens the document over UNO and stores the PDF. HTML goes
 through pandoc first for OpenOffice, whose HTML import loses text. The two
-keep separate profiles in the cache. No office: office formats answer -2.
+keep separate profiles in the cache. No office: office formats answer -5.
 
 The first request for a file takes about a second (the office starts and
 converts it); the ones after it come from the cache in tens of

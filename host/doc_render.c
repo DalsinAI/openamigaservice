@@ -241,7 +241,7 @@ static int to_pdf(const uint8_t *d, uint32_t n, uint32_t format, char *pdf, size
     pthread_once(&office_once, find_office);
     if (!office.soffice[0]) {
         unlink(src);
-        return -1;
+        return -2;                              /* no office on this host */
     }
     if (format == FOURCC('E', 'P', 'U', 'B') || format == FOURCC('M', 'D', ' ', ' ')
         || (format == FOURCC('H', 'T', 'M', 'L') && office.python[0])) {
@@ -377,6 +377,7 @@ int dr_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer
 {
     char pdf[700];
     uint32_t format, pages, pw, ph, ow, oh;
+    int st;
     double wpt, hpt;
 
     *result = *aux = 0;
@@ -388,8 +389,8 @@ int dr_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct dr_buffer
         return DR_TOOSMALL;
     if (op != DR_PROBE && op != DR_RENDER && op != DR_TEXT)
         return DR_BADREQUEST;
-    if (to_pdf(buf[0].in, buf[0].length, format, pdf, sizeof pdf))
-        return DR_BADREQUEST;
+    if ((st = to_pdf(buf[0].in, buf[0].length, format, pdf, sizeof pdf)))
+        return st == -2 ? DR_HOSTERROR : DR_BADREQUEST;
 
     if (op == DR_TEXT) {
         size_t len = 0;
