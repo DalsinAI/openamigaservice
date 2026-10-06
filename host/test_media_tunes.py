@@ -51,7 +51,11 @@ def call(op, data, maxch=2, maxrate=28000, room=0, first=0):
     return md.call(op, first, [maxch, maxrate, 0, 0], 2, [data, None, None, None], [0, room, 0, 0])
 
 
-with tempfile.TemporaryDirectory() as tmp:
+# The work files on a RAM disk and the cache on the real one, as on most
+# Cradle PCs, so the result has to cross filesystems.
+work = tempfile.TemporaryDirectory(dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
+os.environ["TMPDIR"] = work.name
+with tempfile.TemporaryDirectory(dir="/var/tmp") as tmp:
     os.environ["OPENSERVICE_CACHE"] = os.path.join(tmp, "cache")
     os.environ["OPENSERVICE_SIDSECONDS"] = "3"
     import media_decode as md

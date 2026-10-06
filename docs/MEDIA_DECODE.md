@@ -91,7 +91,7 @@ A file that is not one of the pictures above and that FFmpeg recognises is
 taken as a sound (its best audio stream). MIDI files (`MThd`, or RIFF
 `RMID`) are played through FluidSynth with `$OPENSERVICE_SOUNDFONT`, else
 the General MIDI font in `/usr/share/sounds/sf2`; SID tunes (`PSID`,
-`RSID`) through sidplayfp for `$OPENSERVICE_SIDSECONDS` (default 180), as
+`RSID`) through sidplayfp for `$OPENSERVICE_SIDSECONDS` (default 60), as
 SID tunes never end. Both are rendered once to a WAV in the cache
 (`.../sound`), then answered as below.
 

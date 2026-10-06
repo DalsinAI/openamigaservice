@@ -310,7 +310,7 @@ static int convert(const uint8_t *d, uint32_t n, const char *hint, int raw, char
             snprintf(arg, sizeof arg, "%s[0]", src);
             rc = hr_run(im, -1);
         }
-        if (rc == 0 && (stat(dst, &sb) != 0 || sb.st_size == 0 || rename(dst, out) != 0))
+        if (rc == 0 && (stat(dst, &sb) != 0 || sb.st_size == 0 || hr_move(dst, out) != 0))
             rc = -1;
     }
     hr_rmdir(tmp);
@@ -404,16 +404,18 @@ uint8_t *md_tune_render(const uint8_t *d, uint32_t n, uint32_t kind, uint32_t *l
                 if (sf)
                     rc = hr_run(fs, -1);
             } else {
-                /* SID tunes play for ever; OPENSERVICE_SIDSECONDS of it (default 180). */
+                /* SID tunes play for ever; OPENSERVICE_SIDSECONDS of it (default 60:
+                 * the whole length is rendered before the guest hears back, and
+                 * 180 s took 21 s and an 8 MB buffer on the Amiga). */
                 env = getenv("OPENSERVICE_SIDSECONDS");
-                snprintf(secs, sizeof secs, "-t%u", env && atoi(env) > 0 ? (unsigned)atoi(env) : 180u);
+                snprintf(secs, sizeof secs, "-t%u", env && atoi(env) > 0 ? (unsigned)atoi(env) : 60u);
                 snprintf(opt, sizeof opt, "-w%s", dst);
                 {
                     char *sp[] = { "sidplayfp", "-q", secs, opt, src, NULL };
                     rc = hr_run(sp, -1);
                 }
             }
-            if (rc == 0 && (stat(dst, &sb) != 0 || sb.st_size <= 44 || rename(dst, wav) != 0))
+            if (rc == 0 && (stat(dst, &sb) != 0 || sb.st_size <= 44 || hr_move(dst, wav) != 0))
                 rc = -1;
         }
         hr_rmdir(tmp);

@@ -98,6 +98,43 @@ int hr_write(const char *path, const uint8_t *d, uint32_t n)
     return fclose(f) == 0 && ok ? 0 : -1;
 }
 
+int hr_move(const char *from, const char *to)
+{
+    char part[1100], buf[65536];
+    FILE *in, *out;
+    size_t n;
+    int ok = 1;
+
+    if (rename(from, to) == 0)
+        return 0;
+    if (errno != EXDEV)
+        return -1;
+    /* Copied beside the destination first, so no reader sees half a file. */
+    snprintf(part, sizeof part, "%s.%d.part", to, (int)getpid());
+    if (!(in = fopen(from, "rb")))
+        return -1;
+    if (!(out = fopen(part, "wb"))) {
+        fclose(in);
+        return -1;
+    }
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) {
+            ok = 0;
+            break;
+        }
+    if (ferror(in))
+        ok = 0;
+    fclose(in);
+    if (fclose(out) != 0)
+        ok = 0;
+    if (!ok || rename(part, to) != 0) {
+        unlink(part);
+        return -1;
+    }
+    unlink(from);
+    return 0;
+}
+
 uint8_t *hr_read(const char *path, size_t *len)
 {
     FILE *f = fopen(path, "rb");
