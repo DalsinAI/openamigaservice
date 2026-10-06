@@ -28,7 +28,7 @@ PROBE's info, six big-endian u32s: kind (1 picture), format, flags (bit 0:
 alpha), frames, then the width and height DECODE will write for the same
 `extra[0]` and `extra[1]`. Formats: `'AVIF'`, `'HEIC'`, `'JPEG'`, `'PNG '`,
 `'GIF '`, `'WEBP'`, `'JXL '`, `'EXR '`, `'HDR '`, `'PSD '`, `'QOI '`,
-`'DDS '`, `'J2K '`, `'TIFF'`, `'DPX '`, `'PCX '`, `'SGI '`, `'SVG '`, `'STIL'` (another
+`'DDS '`, `'J2K '`, `'TIFF'`, `'DPX '`, `'PCX '`, `'SGI '`, `'ICO '`, `'SVG '`, `'STIL'` (another
 picture FFmpeg reads), `'RAW '` (camera RAW), or for ImageMagick the hint in
 capitals (`'TGA '`), else `'IMGK'`.
 
@@ -40,7 +40,9 @@ The hint is the extension in up to four ASCII letters, big-endian and
 space-padded (`'CR2 '`, `'TGA '`). Pictures are recognised by their bytes
 first; the hint matters for formats with no signature (TGA) and sends
 camera RAW, which is TIFF inside, to LibRaw. GIF and APNG answer with their
-first frame. OpenRaster (`'ORA '`) and Krita (`'KRA '`) files answer with
+first frame (and VOPEN plays them as a video without sound), an icon file
+(`'ICO '`) with its largest icon, and a TrueType or OpenType font (hint
+`'TTF '` or `'OTF '`) with ImageMagick's sample sheet. OpenRaster (`'ORA '`) and Krita (`'KRA '`) files answer with
 their flattened picture, and a comic book (`'CBZ '`, only with the hint
 `'CBZ '`) with its first page by name. Pictures through ImageMagick or LibRaw are converted once and
 kept in the cache (`$OPENSERVICE_CACHE/picture`, else

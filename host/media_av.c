@@ -297,8 +297,10 @@ static const AVInputFormat *probe(const uint8_t *d, uint32_t n)
 static int is_still(const AVInputFormat *f)
 {
     size_t len = strlen(f->name);
-    /* GIF and APNG answer PROBE and DECODE with their first frame. */
-    return (len > 5 && !strcmp(f->name + len - 5, "_pipe")) || !strcmp(f->name, "gif") || !strcmp(f->name, "apng");
+    /* GIF and APNG answer PROBE and DECODE with their first frame, an icon
+     * file with its first icon. */
+    return (len > 5 && !strcmp(f->name + len - 5, "_pipe")) || !strcmp(f->name, "gif") || !strcmp(f->name, "apng")
+           || !strcmp(f->name, "ico");
 }
 
 int md_is_av(const uint8_t *d, uint32_t n)
@@ -313,7 +315,7 @@ static uint32_t still_fourcc(const char *name)
 {
     static const struct { const char *name; uint32_t fourcc; } map[] = {
         { "jpeg_pipe", MD_FORMAT_JPEG }, { "png_pipe", MD_FORMAT_PNG }, { "gif_pipe", MD_FORMAT_GIF }, { "gif", MD_FORMAT_GIF },
-        { "apng", MD_FORMAT_PNG },
+        { "apng", MD_FORMAT_PNG }, { "ico", MD_FORMAT_ICO },
         { "jpegxl_pipe", MD_FORMAT_JXL }, { "exr_pipe", MD_FORMAT_EXR }, { "hdr_pipe", MD_FORMAT_HDR },
         { "psd_pipe", MD_FORMAT_PSD }, { "qoi_pipe", MD_FORMAT_QOI }, { "dds_pipe", MD_FORMAT_DDS },
         { "j2k_pipe", MD_FORMAT_J2K }, { "tiff_pipe", MD_FORMAT_TIFF }, { "webp_pipe", MD_FORMAT_WEBP },
@@ -358,6 +360,18 @@ int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, ui
     /* No avformat_find_stream_info: it decodes the picture once just to look. */
     if ((stream = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0)) < 0)
         goto out;
+    /* An icon file holds the same icon at several sizes: the largest. */
+    if (!strcmp(f->name, "ico")) {
+        unsigned i;
+        for (i = 0; i < fmt->nb_streams; i++) {
+            const AVCodecParameters *a = fmt->streams[i]->codecpar, *b = fmt->streams[stream]->codecpar;
+            const AVCodec *c;
+            if ((int64_t)a->width * a->height > (int64_t)b->width * b->height && (c = avcodec_find_decoder(a->codec_id))) {
+                stream = i;
+                codec = c;
+            }
+        }
+    }
     if (!(dec = avcodec_alloc_context3(codec))
         || avcodec_parameters_to_context(dec, fmt->streams[stream]->codecpar) < 0
         || avcodec_open2(dec, codec, NULL) < 0)

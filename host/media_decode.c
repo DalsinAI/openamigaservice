@@ -325,7 +325,7 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
         return md_svg_call(op, extra, buf, result, aux);
 #ifdef MD_AV
     if (op == MD_VOPEN) {
-        if (!buf[0].in || !buf[0].length || md_is_av(buf[0].in, buf[0].length) != MD_AV_MEDIA)
+        if (!buf[0].in || !buf[0].length || md_is_av(buf[0].in, buf[0].length) == MD_AV_NONE)
             return MD_BADREQUEST;
         if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
             return MD_TOOSMALL;

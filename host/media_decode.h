@@ -36,6 +36,7 @@
 #define MD_FORMAT_DPX  0x44505820u   /* 'DPX ' */
 #define MD_FORMAT_PCX  0x50435820u   /* 'PCX ' */
 #define MD_FORMAT_SGI  0x53474920u   /* 'SGI ' */
+#define MD_FORMAT_ICO  0x49434f20u   /* 'ICO ': a Windows icon file's first icon */
 #define MD_FORMAT_SVG  0x53564720u   /* 'SVG ': drawn by librsvg, at the size asked */
 #define MD_FORMAT_STILL  0x5354494cu /* 'STIL': another picture FFmpeg reads */
 #define MD_FORMAT_RAW    0x52415720u /* 'RAW ': camera RAW, through LibRaw */
