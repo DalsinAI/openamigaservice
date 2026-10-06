@@ -35,6 +35,8 @@
 #include "devices/openservice.h"
 #include "openservice.h"
 #include "mdns.h"
+#include "oscrypto.h"
+#include "osrandom.h"
 
 #ifndef REG
 #define REG(reg, arg) arg __asm(#reg)
@@ -42,10 +44,10 @@
 
 const char DevName[] = OPENSERVICE_NAME;
 /* "Version DEVS:openservice.device" reads this; the ROMTag shows the rest. */
-const char DevVersion[] __attribute__((used)) = "$VER: openservice.device 1.0 (5.10.2026)";
+const char DevVersion[] __attribute__((used)) = "$VER: openservice.device 1.1 (6.10.2026)";
 #define DevIdString (DevVersion + 6)
 #define DEV_VERSION 1
-#define DEV_REVISION 0
+#define DEV_REVISION 1
 
 struct ExecBase *SysBase;
 struct DosLibrary *DOSBase;
@@ -192,6 +194,13 @@ struct conn {
     ULONG address;
     UWORD port;
     UWORD users;                     /* handles on it */
+    /* A sealed session (docs/PAIRING.md): keys each way, the record
+     * counters, and the record being read. */
+    UBYTE sealed;
+    UBYTE txKey[32], rxKey[32];
+    ULONG txCount, rxCount;
+    UBYTE *record;
+    ULONG recordLength, recordAt;
 };
 static struct conn conns[MAX_CONNS];
 
@@ -358,22 +367,135 @@ static int recvAll(LONG s, void *data, ULONG length)
     return 1;
 }
 
+#define MAX_RECORD (16UL << 20)
+
+static void nonceFor(UBYTE nonce[12], ULONG count)
+{
+    memset(nonce, 0, 12);
+    nonce[8] = (UBYTE)(count >> 24);
+    nonce[9] = (UBYTE)(count >> 16);
+    nonce[10] = (UBYTE)(count >> 8);
+    nonce[11] = (UBYTE)count;
+}
+
+/* Reads from connection c: straight off the socket, or out of its sealed
+ * records, opening the next one as needed. */
+static int connRead(int c, void *data, ULONG length)
+{
+    struct conn *k = &conns[c];
+    UBYTE *out = data;
+    if (!k->sealed)
+        return recvAll(k->socket, data, length);
+    while (length) {
+        ULONG n;
+        if (k->recordAt == k->recordLength) {
+            UBYTE head[4], nonce[12];
+            ULONG size;
+            if (!recvAll(k->socket, head, 4))
+                return 0;
+            size = (ULONG)head[0] << 24 | (ULONG)head[1] << 16 | (ULONG)head[2] << 8 | head[3];
+            if (size < 16 || size > MAX_RECORD)
+                return 0;
+            if (k->record)
+                FreeVec(k->record);
+            k->record = AllocVec(size, MEMF_ANY);
+            k->recordLength = k->recordAt = 0;
+            if (!k->record || !recvAll(k->socket, k->record, size))
+                return 0;
+            nonceFor(nonce, k->rxCount++);
+            if (!os_aead_open(k->rxKey, nonce, head, 4, k->record, size - 16, k->record + size - 16))
+                return 0;                     /* not from the paired Cradle */
+            k->recordLength = size - 16;
+        }
+        n = k->recordLength - k->recordAt;
+        if (n > length)
+            n = length;
+        memcpy(out, k->record + k->recordAt, n);
+        k->recordAt += n;
+        out += n;
+        length -= n;
+    }
+    return 1;
+}
+
+/* Sends one frame (pieces in order) as one sealed record, or as it is. */
+static int connWrite(int c, const UBYTE *const *pieces, const ULONG *lengths, int count)
+{
+    struct conn *k = &conns[c];
+    ULONG total = 0, at = 4;
+    UBYTE *record, nonce[12];
+    int i, ok;
+    if (!k->sealed) {
+        for (i = 0; i < count; i++)
+            if (lengths[i] && !sendAll(k->socket, pieces[i], lengths[i]))
+                return 0;
+        return 1;
+    }
+    for (i = 0; i < count; i++)
+        total += lengths[i];
+    if (total + 16 > MAX_RECORD || !(record = AllocVec(4 + total + 16, MEMF_ANY)))
+        return 0;
+    record[0] = (UBYTE)((total + 16) >> 24);
+    record[1] = (UBYTE)((total + 16) >> 16);
+    record[2] = (UBYTE)((total + 16) >> 8);
+    record[3] = (UBYTE)(total + 16);
+    for (i = 0; i < count; i++) {
+        memcpy(record + at, pieces[i], lengths[i]);
+        at += lengths[i];
+    }
+    nonceFor(nonce, k->txCount++);
+    os_aead_seal(k->txKey, nonce, record, 4, record + 4, total, record + 4 + total);
+    ok = sendAll(k->socket, record, 4 + total + 16);
+    FreeVec(record);
+    return ok;
+}
+
+/* The session handshake on a fresh connection to a Cradle paired with a
+ * code (its key in hand): 0 when the Cradle refuses or answers wrongly. */
+static int connSeal(int c, const UBYTE psk[32])
+{
+    struct conn *k = &conns[c];
+    UBYTE hello[36], answer[20], salt[32], keys[64];
+    if (!openservice_amiga_id(hello + 4))
+        return 0;
+    memcpy(hello, "OSE1", 4);
+    os_random(hello + 20, 16, 0);
+    if (!sendAll(k->socket, hello, sizeof hello) || !recvAll(k->socket, answer, 4) || memcmp(answer, "OSE1", 4)
+        || !recvAll(k->socket, answer + 4, 16))
+        return 0;
+    memcpy(salt, hello + 20, 16);
+    memcpy(salt + 16, answer + 4, 16);
+    os_hkdf_sha256(psk, 32, salt, 32, "openservice session v1", keys, 64);
+    memcpy(k->txKey, keys, 32);
+    memcpy(k->rxKey, keys + 32, 32);
+    memset(keys, 0, sizeof keys);
+    k->txCount = k->rxCount = 0;
+    k->record = NULL;
+    k->recordLength = k->recordAt = 0;
+    k->sealed = 1;
+    return 1;
+}
+
 static void connLost(int c);
 
 static int lanSubmit(struct pending *p, int c, UWORD service, UWORD op, const struct OSRequest *io, ULONG arg)
 {
     UBYTE e[64];
     int i;
+    const UBYTE *pieces[5];
+    ULONG lengths[5];
+    int count = 1;
     putEntry(e, p->id, service, op, io);
     if (!io)
         ((ULONG *)e)[3] = arg;
-    if (!sendAll(conns[c].socket, e, sizeof e))
-        return 0;
+    pieces[0] = e;
+    lengths[0] = sizeof e;
     for (i = 0; io && i < 4; i++)
-        if (io->os_Buf[i].ob_Length && !(io->os_Flags & (1UL << i))
-            && !sendAll(conns[c].socket, io->os_Buf[i].ob_Data, io->os_Buf[i].ob_Length))
-            return 0;
-    return 1;
+        if (io->os_Buf[i].ob_Length && !(io->os_Flags & (1UL << i))) {
+            pieces[count] = io->os_Buf[i].ob_Data;
+            lengths[count++] = io->os_Buf[i].ob_Length;
+        }
+    return connWrite(c, pieces, lengths, count);
 }
 
 /* One answer from connection c: the completion, then the written buffers. */
@@ -383,7 +505,7 @@ static void lanReceive(int c)
     struct pending *p;
     int i;
     dbg("lanReceive", c, conns[c].socket);
-    if (!recvAll(conns[c].socket, head, sizeof head)) {
+    if (!connRead(c, head, sizeof head)) {
         connLost(c);
         return;
     }
@@ -393,25 +515,26 @@ static void lanReceive(int c)
         ULONG want, room, n;
         if (!io || !io->os_Buf[i].ob_Length || !(io->os_Flags & (1UL << i)))
             continue;
-        if (!recvAll(conns[c].socket, &want, 4)) {
+        if (!connRead(c, &want, 4)) {
             connLost(c);
             return;
         }
         room = io->os_Buf[i].ob_Length;
         n = want < room ? want : room;
-        if (!recvAll(conns[c].socket, io->os_Buf[i].ob_Data, n)) {
+        if (!connRead(c, io->os_Buf[i].ob_Data, n)) {
             connLost(c);
             return;
         }
         for (; n < want; n++) {          /* more than fits: read and drop */
             UBYTE drop;
-            if (!recvAll(conns[c].socket, &drop, 1)) {
+            if (!connRead(c, &drop, 1)) {
                 connLost(c);
                 return;
             }
         }
     }
     dbg("lan answer id/status", head[0], head[1]);
+    conns[c].recordAt = conns[c].recordLength;   /* the rest of a sealed answer, if nobody wanted it */
     if (p)
         completed(p, (LONG)head[1], head[2], head[3]);
 }
@@ -464,6 +587,19 @@ static int lanConnect(const struct mdns_cradle *cr)
     conns[free].address = cr->address;
     conns[free].port = cr->port;
     conns[free].users = 0;
+    conns[free].sealed = 0;
+    conns[free].record = NULL;
+    {
+        UBYTE psk[32];
+        int keyed = openservice_psk(cr->fingerprint, psk), ok = !keyed || connSeal(free, psk);
+        dbg("lanConnect keyed/ok", keyed, ok);
+        memset(psk, 0, sizeof psk);
+        if (!ok) {                       /* paired with a code, but the Cradle disagrees */
+            CloseSocket(conns[free].socket);
+            conns[free].socket = -1;
+            return -1;
+        }
+    }
     return free;
 }
 
@@ -556,6 +692,10 @@ static void connLost(int c)
     if (conns[c].socket >= 0)
         CloseSocket(conns[c].socket);
     conns[c].socket = -1;
+    if (conns[c].record)
+        FreeVec(conns[c].record);
+    conns[c].record = NULL;
+    conns[c].sealed = 0;
     for (i = 0; i < MAX_PENDING; i++)
         if (pending[i].id && pending[i].where == WHERE_LAN && pending[i].conn == c)
             completed(&pending[i], OSERR_LOST, 0, 0);
@@ -964,6 +1104,7 @@ static void workerMain(void)
         if (conns[i].socket >= 0)
             CloseSocket(conns[i].socket);
     cardStop();
+    os_random_close();
     if (SocketBase)
         CloseLibrary(SocketBase);
     SocketBase = NULL;
