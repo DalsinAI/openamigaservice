@@ -19,6 +19,10 @@ int hr_tempdir(char *out, size_t room);
 void hr_rmdir(const char *dir);
 /* Writes n bytes to path; 0 on success. */
 int hr_write(const char *path, const uint8_t *d, uint32_t n);
+/* Moves a finished file into place: a rename, or a copy and a rename when
+ * the two are on different filesystems (/tmp is often a RAM disk); 0 on
+ * success. */
+int hr_move(const char *from, const char *to);
 /* Reads a whole file, malloc'd; NULL on failure. */
 uint8_t *hr_read(const char *path, size_t *len);
 

@@ -294,11 +294,34 @@ static const AVInputFormat *probe(const uint8_t *d, uint32_t n)
 }
 
 /* A still picture: one of FFmpeg's piped image readers (jpegxl_pipe, ...). */
+/* The entry of an icon file's directory with the most pixels (a width or
+ * height of 0 there means 256); -1 when the directory is short. */
+static int ico_largest(const uint8_t *d, uint32_t n)
+{
+    uint32_t count, i, best = 0;
+    int pick = -1;
+
+    if (n < 6)
+        return -1;
+    count = d[4] | d[5] << 8;
+    for (i = 0; i < count && 6 + 16 * (i + 1) <= n; i++) {
+        const uint8_t *e = d + 6 + 16 * i;
+        uint32_t w = e[0] ? e[0] : 256, h = e[1] ? e[1] : 256;
+        if (w * h > best) {
+            best = w * h;
+            pick = (int)i;
+        }
+    }
+    return pick;
+}
+
 static int is_still(const AVInputFormat *f)
 {
     size_t len = strlen(f->name);
-    /* GIF and APNG answer PROBE and DECODE with their first frame. */
-    return (len > 5 && !strcmp(f->name + len - 5, "_pipe")) || !strcmp(f->name, "gif") || !strcmp(f->name, "apng");
+    /* GIF and APNG answer PROBE and DECODE with their first frame, an icon
+     * file with its first icon. */
+    return (len > 5 && !strcmp(f->name + len - 5, "_pipe")) || !strcmp(f->name, "gif") || !strcmp(f->name, "apng")
+           || !strcmp(f->name, "ico");
 }
 
 int md_is_av(const uint8_t *d, uint32_t n)
@@ -313,7 +336,7 @@ static uint32_t still_fourcc(const char *name)
 {
     static const struct { const char *name; uint32_t fourcc; } map[] = {
         { "jpeg_pipe", MD_FORMAT_JPEG }, { "png_pipe", MD_FORMAT_PNG }, { "gif_pipe", MD_FORMAT_GIF }, { "gif", MD_FORMAT_GIF },
-        { "apng", MD_FORMAT_PNG },
+        { "apng", MD_FORMAT_PNG }, { "ico", MD_FORMAT_ICO },
         { "jpegxl_pipe", MD_FORMAT_JXL }, { "exr_pipe", MD_FORMAT_EXR }, { "hdr_pipe", MD_FORMAT_HDR },
         { "psd_pipe", MD_FORMAT_PSD }, { "qoi_pipe", MD_FORMAT_QOI }, { "dds_pipe", MD_FORMAT_DDS },
         { "j2k_pipe", MD_FORMAT_J2K }, { "tiff_pipe", MD_FORMAT_TIFF }, { "webp_pipe", MD_FORMAT_WEBP },
@@ -358,6 +381,19 @@ int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, ui
     /* No avformat_find_stream_info: it decodes the picture once just to look. */
     if ((stream = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &codec, 0)) < 0)
         goto out;
+    /* An icon file holds the same icon at several sizes: the largest, by the
+     * file's own directory (FFmpeg leaves a PNG icon's size at 0 until it is
+     * decoded); its streams are the directory's entries, in order. */
+    if (!strcmp(f->name, "ico")) {
+        int big = ico_largest(d, n);
+        if (big >= 0 && (unsigned)big < fmt->nb_streams) {
+            const AVCodec *c = avcodec_find_decoder(fmt->streams[big]->codecpar->codec_id);
+            if (c) {
+                stream = big;
+                codec = c;
+            }
+        }
+    }
     if (!(dec = avcodec_alloc_context3(codec))
         || avcodec_parameters_to_context(dec, fmt->streams[stream]->codecpar) < 0
         || avcodec_open2(dec, codec, NULL) < 0)
@@ -366,7 +402,8 @@ int md_still_load(const uint8_t *d, uint32_t n, int decode, uint32_t *format, ui
     *flags = 0;
     *width = dec->width;
     *height = dec->height;
-    if (!decode && *width && *height) {
+    /* An icon's alpha (a BMP icon's bit depth) shows only once it is decoded. */
+    if (!decode && *width && *height && strcmp(f->name, "ico")) {
         const AVPixFmtDescriptor *pd = av_pix_fmt_desc_get(dec->pix_fmt);
         if (pd && (pd->flags & AV_PIX_FMT_FLAG_ALPHA))
             *flags = MD_FLAG_ALPHA;
@@ -440,9 +477,11 @@ struct video {
     AVPacket *pkt;
     AVFrame *frame, *rgb;
     int stream;
-    int64_t *pts;              /* each frame's time stamp, in presentation order */
-    uint32_t frames, ow, oh;
-    int64_t next;              /* the frame the decoder gives next; -1: unknown (seek) */
+    int64_t *pts;              /* each source frame's time stamp, in presentation order */
+    uint32_t *map;             /* frame asked -> source frame, when frames last unevenly; else NULL */
+    uint32_t frames, nsrc, ow, oh;   /* frames asked for (evenly timed), source frames */
+    uint32_t shown;            /* the source frame in rgb; UINT32_MAX: none */
+    int64_t next;              /* the source frame the decoder gives next; -1: unknown (seek) */
 };
 
 static struct video videos[MAX_VIDEOS];
@@ -462,6 +501,7 @@ static void video_free(struct video *v)
         avio_context_free(&v->io);
     }
     free(v->pts);
+    free(v->map);
     free(v->file);
     memset(v, 0, sizeof *v);
 }
@@ -489,6 +529,51 @@ static int cmp64(const void *a, const void *b)
     return x < y ? -1 : x > y;
 }
 
+/* Frames that last unevenly (a GIF or APNG pausing on one picture, or a
+ * variable-rate video) are played at one steady rate: the shortest frame's,
+ * at most 50 a second, each source frame repeated for as long as it lasts.
+ * The Amiga then asks for frames by a steady clock, as for any video. */
+static int even_out(struct video *v, AVRational tb, int64_t last_dur, uint32_t *fps1000)
+{
+    int64_t tick = 0, most = 0, floor_tick, span, i;
+    uint32_t k, n, src = 0;
+
+    if (v->nsrc < 2 || tb.num <= 0 || tb.den <= 0)
+        return MD_OK;
+    for (i = 1; i < v->nsrc; i++) {
+        int64_t d = v->pts[i] - v->pts[i - 1];
+        if (d > 0 && (!tick || d < tick))
+            tick = d;
+        if (d > most)
+            most = d;
+    }
+    if (last_dur > most)
+        most = last_dur;
+    /* Steady enough already: time stamps that wobble by a tick or so. */
+    if (!tick || most * 2 < tick * 3)
+        return MD_OK;
+    if (last_dur <= 0)
+        last_dur = tick;
+    floor_tick = av_rescale_q(1, (AVRational){ 1, 50 }, tb);
+    if (tick < floor_tick)
+        tick = floor_tick > 0 ? floor_tick : 1;
+    span = v->pts[v->nsrc - 1] - v->pts[0] + last_dur;
+    n = span / tick + (span % tick != 0);
+    if (!n || n > 200000)
+        return MD_OK;                  /* far too long: kept as it is */
+    if (!(v->map = malloc((size_t)n * sizeof *v->map)))
+        return MD_HOSTERROR;
+    for (k = 0; k < n; k++) {
+        int64_t t = v->pts[0] + (int64_t)k * tick;
+        while (src + 1 < v->nsrc && v->pts[src + 1] <= t)
+            src++;
+        v->map[k] = src;
+    }
+    v->frames = n;
+    *fps1000 = (uint32_t)((int64_t)tb.den * 1000 / ((int64_t)tb.num * tick));
+    return MD_OK;
+}
+
 static int video_open(struct video *v, const uint8_t *d, uint32_t n, uint32_t maxw, uint32_t maxh, uint32_t *fps1000)
 {
     const AVCodec *codec = NULL;
@@ -496,6 +581,7 @@ static int video_open(struct video *v, const uint8_t *d, uint32_t n, uint32_t ma
     uint8_t *iobuf;
     uint32_t cap = 0;
     AVRational rate;
+    int64_t last_t = 0, last_dur = 0;
 
     av_log_set_level(AV_LOG_ERROR);
     if (!(v->file = malloc(n)))
@@ -531,6 +617,10 @@ static int video_open(struct video *v, const uint8_t *d, uint32_t n, uint32_t ma
     while (av_read_frame(v->fmt, v->pkt) >= 0) {
         if (v->pkt->stream_index == v->stream) {
             int64_t t = v->pkt->pts != AV_NOPTS_VALUE ? v->pkt->pts : v->pkt->dts;
+            if (t != AV_NOPTS_VALUE && (!v->frames || t >= last_t)) {
+                last_t = t;
+                last_dur = v->pkt->duration;
+            }
             if (v->frames == cap) {
                 int64_t *more = realloc(v->pts, (cap = cap ? cap * 2 : 1024) * sizeof *more);
                 if (!more) {
@@ -548,6 +638,8 @@ static int video_open(struct video *v, const uint8_t *d, uint32_t n, uint32_t ma
         return MD_BADREQUEST;
     qsort(v->pts, v->frames, sizeof *v->pts, cmp64);
     v->next = -1;
+    v->shown = UINT32_MAX;
+    v->nsrc = v->frames;
 
     md_fit(v->dec->width, v->dec->height, maxw, maxh, &v->ow, &v->oh);
     if (!(v->sws = sws_getContext(v->dec->width, v->dec->height, v->dec->pix_fmt, v->ow, v->oh, AV_PIX_FMT_RGB24,
@@ -560,7 +652,7 @@ static int video_open(struct video *v, const uint8_t *d, uint32_t n, uint32_t ma
         return MD_HOSTERROR;
     rate = av_guess_frame_rate(v->fmt, st, NULL);
     *fps1000 = rate.num > 0 && rate.den > 0 ? (uint32_t)((int64_t)rate.num * 1000 / rate.den) : 25000;
-    return MD_OK;
+    return even_out(v, st->time_base, last_dur, fps1000);
 }
 
 /* The 6x6x6 colour cube with 4x4 ordered dithering: index i < 216 is red
@@ -621,6 +713,33 @@ static int video_seek_decode(struct video *v, uint32_t want)
     }
 }
 
+/* 1 when an animation asks to repeat: an APNG's acTL or a GIF's NETSCAPE2.0
+ * block with a play count of 0 (for ever) or more than one. */
+static int loops(const uint8_t *d, uint32_t n)
+{
+    uint32_t i, end = n < 65536 ? n : 65536;
+
+    if (n > 8 && !memcmp(d, "\x89PNG", 4)) {
+        for (i = 8; i + 8 <= end;) {                  /* chunks up to the first IDAT */
+            uint32_t len = (uint32_t)d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3];
+            if (!memcmp(d + i + 4, "acTL", 4) && i + 16 <= n) {
+                uint32_t plays = (uint32_t)d[i + 12] << 24 | d[i + 13] << 16 | d[i + 14] << 8 | d[i + 15];
+                return plays != 1;
+            }
+            if (!memcmp(d + i + 4, "IDAT", 4) || len > n)
+                break;
+            i += 12 + len;
+        }
+        return 0;
+    }
+    if (n > 6 && !memcmp(d, "GIF8", 4))
+        for (i = 13; i + 16 <= end; i++)
+            if (d[i] == 0x21 && d[i + 1] == 0xff && d[i + 2] == 11 && !memcmp(d + i + 3, "NETSCAPE2.0", 11)
+                && d[i + 14] == 3 && d[i + 15] == 1 && i + 18 <= n)
+                return (d[i + 16] | d[i + 17] << 8) != 1;
+    return 0;
+}
+
 int md_video_open(const struct md_buffer *file, const uint32_t extra[4], uint8_t info[MD_INFO_SIZE],
                   uint32_t *result, uint32_t *aux)
 {
@@ -650,7 +769,7 @@ int md_video_open(const struct md_buffer *file, const uint32_t extra[4], uint8_t
     audio = av_find_best_stream(v->fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0) >= 0;
     md_put32(info, MD_KIND_ANIMATION);
     md_put32(info + 4, video_fourcc(v->dec->codec_id));
-    md_put32(info + 8, audio ? MD_FLAG_SOUND : 0);
+    md_put32(info + 8, (audio ? MD_FLAG_SOUND : 0) | (loops(file->in, file->length) ? MD_FLAG_LOOP : 0));
     md_put32(info + 12, v->frames);
     md_put32(info + 16, v->ow);
     md_put32(info + 20, v->oh);
@@ -680,7 +799,12 @@ int md_video_frame(uint32_t handle, const uint32_t extra[4], struct md_buffer *o
         pthread_mutex_unlock(&video_lock);
         return MD_TOOSMALL;
     }
-    if ((st = video_seek_decode(v, want)) == MD_OK) {
+    {
+        uint32_t src = v->map ? v->map[want] : want;
+        st = src == v->shown ? MD_OK : video_seek_decode(v, src);
+        v->shown = st == MD_OK ? src : UINT32_MAX;
+    }
+    if (st == MD_OK) {
         if (extra[1] == 1) {                       /* 24-bit RGB */
             uint32_t y;
             if (out->length < v->ow * v->oh * 3)

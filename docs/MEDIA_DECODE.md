@@ -28,7 +28,7 @@ PROBE's info, six big-endian u32s: kind (1 picture), format, flags (bit 0:
 alpha), frames, then the width and height DECODE will write for the same
 `extra[0]` and `extra[1]`. Formats: `'AVIF'`, `'HEIC'`, `'JPEG'`, `'PNG '`,
 `'GIF '`, `'WEBP'`, `'JXL '`, `'EXR '`, `'HDR '`, `'PSD '`, `'QOI '`,
-`'DDS '`, `'J2K '`, `'TIFF'`, `'DPX '`, `'PCX '`, `'SGI '`, `'SVG '`, `'STIL'` (another
+`'DDS '`, `'J2K '`, `'TIFF'`, `'DPX '`, `'PCX '`, `'SGI '`, `'ICO '`, `'SVG '`, `'STIL'` (another
 picture FFmpeg reads), `'RAW '` (camera RAW), or for ImageMagick the hint in
 capitals (`'TGA '`), else `'IMGK'`.
 
@@ -40,7 +40,9 @@ The hint is the extension in up to four ASCII letters, big-endian and
 space-padded (`'CR2 '`, `'TGA '`). Pictures are recognised by their bytes
 first; the hint matters for formats with no signature (TGA) and sends
 camera RAW, which is TIFF inside, to LibRaw. GIF and APNG answer with their
-first frame. OpenRaster (`'ORA '`) and Krita (`'KRA '`) files answer with
+first frame (and VOPEN plays them as a video without sound), an icon file
+(`'ICO '`) with its largest icon, and a TrueType or OpenType font (hint
+`'TTF '` or `'OTF '`) with ImageMagick's sample sheet. OpenRaster (`'ORA '`) and Krita (`'KRA '`) files answer with
 their flattened picture, and a comic book (`'CBZ '`, only with the hint
 `'CBZ '`) with its first page by name. Pictures through ImageMagick or LibRaw are converted once and
 kept in the cache (`$OPENSERVICE_CACHE/picture`, else
@@ -89,7 +91,7 @@ A file that is not one of the pictures above and that FFmpeg recognises is
 taken as a sound (its best audio stream). MIDI files (`MThd`, or RIFF
 `RMID`) are played through FluidSynth with `$OPENSERVICE_SOUNDFONT`, else
 the General MIDI font in `/usr/share/sounds/sf2`; SID tunes (`PSID`,
-`RSID`) through sidplayfp for `$OPENSERVICE_SIDSECONDS` (default 180), as
+`RSID`) through sidplayfp for `$OPENSERVICE_SIDSECONDS` (default 60), as
 SID tunes never end. Both are rendered once to a WAV in the cache
 (`.../sound`), then answered as below.
 
@@ -125,7 +127,8 @@ belong to the host, not to one Amiga.
 VOPEN's info: kind (2 animation), format (`'H264'`, `'HEVC'`, `'AV1 '`,
 `'VP8 '`, `'VP9 '`, `'MPG4'`, `'MPG2'`, `'WMV '`, `'MJPG'`, `'THOR'`, or
 `'VIDE'` for another), flags (bit 1: it has a sound track, which PROBE and
-DECODE give as a sound), frames, then the width and height of each frame.
+DECODE give as a sound; bit 2: an animation, GIF or APNG, that asks to play
+over and over), frames, then the width and height of each frame.
 
 VFRAME in 256 colours is one byte a pixel, rows packed, in the 6x6x6
 colour cube that openamigaimage's webm.datatype uses (index i < 216 is red
@@ -133,3 +136,9 @@ i / 36, green i / 6 % 6, blue i % 6, each step 51; 216 to 255 a grey ramp,
 unused here), with 4x4 ordered dithering. In 24-bit it is R, G, B bytes.
 Frames asked for in order are decoded straight on; going back, or jumping
 more than 50 frames ahead, seeks to the key frame before.
+
+Frames that last unevenly (a GIF or APNG holding one picture longer, or a
+variable-rate video) are given at one steady rate: the shortest frame's, at
+most 50 a second, each picture repeated for as long as it lasts. `frames`
+and the rate VOPEN gives count those steady frames, so the Amiga plays
+them by its clock as it plays any video.
