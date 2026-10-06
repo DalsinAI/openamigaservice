@@ -70,6 +70,7 @@
 
 #define MD_FLAG_ALPHA 1
 #define MD_FLAG_SOUND 2   /* a video with a sound track */
+#define MD_FLAG_LOOP  4   /* an animation (GIF, APNG) that asks to play over and over */
 
 #define MD_INFO_SIZE 24
 

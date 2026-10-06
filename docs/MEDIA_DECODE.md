@@ -127,7 +127,8 @@ belong to the host, not to one Amiga.
 VOPEN's info: kind (2 animation), format (`'H264'`, `'HEVC'`, `'AV1 '`,
 `'VP8 '`, `'VP9 '`, `'MPG4'`, `'MPG2'`, `'WMV '`, `'MJPG'`, `'THOR'`, or
 `'VIDE'` for another), flags (bit 1: it has a sound track, which PROBE and
-DECODE give as a sound), frames, then the width and height of each frame.
+DECODE give as a sound; bit 2: an animation, GIF or APNG, that asks to play
+over and over), frames, then the width and height of each frame.
 
 VFRAME in 256 colours is one byte a pixel, rows packed, in the 6x6x6
 colour cube that openamigaimage's webm.datatype uses (index i < 216 is red

@@ -59,6 +59,7 @@ with tempfile.TemporaryDirectory() as tmp:
         st, handle, fps, info = call(VOPEN, data, w=160, h=160)
         kind, fmt, flags, frames, w, h = struct.unpack(">6I", info)
         assert (st, kind, flags & 2, frames, w, h, fps) == (0, 2, 0, 5, 64, 48, 5000), (ext, st, flags, frames, w, h, fps)
+        assert flags & 4, (ext, flags)                  # both made to loop for ever
         st, got, _, out = md.call(VFRAME, handle, [2, 1, 0, 0], 2, [None] * 4, [0, 64 * 48 * 3, 0, 0])
         assert st == 0 and got == 2 and sum(1 for b in out[1] if b) > 1000, (ext, st, got)
         md.call(VCLOSE, handle, [0, 0, 0, 0], 2, [None] * 4, [0, 0, 0, 0])

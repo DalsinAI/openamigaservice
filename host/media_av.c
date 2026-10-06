@@ -713,6 +713,33 @@ static int video_seek_decode(struct video *v, uint32_t want)
     }
 }
 
+/* 1 when an animation asks to repeat: an APNG's acTL or a GIF's NETSCAPE2.0
+ * block with a play count of 0 (for ever) or more than one. */
+static int loops(const uint8_t *d, uint32_t n)
+{
+    uint32_t i, end = n < 65536 ? n : 65536;
+
+    if (n > 8 && !memcmp(d, "\x89PNG", 4)) {
+        for (i = 8; i + 8 <= end;) {                  /* chunks up to the first IDAT */
+            uint32_t len = (uint32_t)d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3];
+            if (!memcmp(d + i + 4, "acTL", 4) && i + 16 <= n) {
+                uint32_t plays = (uint32_t)d[i + 12] << 24 | d[i + 13] << 16 | d[i + 14] << 8 | d[i + 15];
+                return plays != 1;
+            }
+            if (!memcmp(d + i + 4, "IDAT", 4) || len > n)
+                break;
+            i += 12 + len;
+        }
+        return 0;
+    }
+    if (n > 6 && !memcmp(d, "GIF8", 4))
+        for (i = 13; i + 16 <= end; i++)
+            if (d[i] == 0x21 && d[i + 1] == 0xff && d[i + 2] == 11 && !memcmp(d + i + 3, "NETSCAPE2.0", 11)
+                && d[i + 14] == 3 && d[i + 15] == 1 && i + 18 <= n)
+                return (d[i + 16] | d[i + 17] << 8) != 1;
+    return 0;
+}
+
 int md_video_open(const struct md_buffer *file, const uint32_t extra[4], uint8_t info[MD_INFO_SIZE],
                   uint32_t *result, uint32_t *aux)
 {
@@ -742,7 +769,7 @@ int md_video_open(const struct md_buffer *file, const uint32_t extra[4], uint8_t
     audio = av_find_best_stream(v->fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0) >= 0;
     md_put32(info, MD_KIND_ANIMATION);
     md_put32(info + 4, video_fourcc(v->dec->codec_id));
-    md_put32(info + 8, audio ? MD_FLAG_SOUND : 0);
+    md_put32(info + 8, (audio ? MD_FLAG_SOUND : 0) | (loops(file->in, file->length) ? MD_FLAG_LOOP : 0));
     md_put32(info + 12, v->frames);
     md_put32(info + 16, v->ow);
     md_put32(info + 20, v->oh);
