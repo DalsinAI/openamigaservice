@@ -26,10 +26,75 @@ static LONG run(struct OSRequest *io, UWORD command)
     return io->os_Req.io_Error ? -100 - io->os_Req.io_Error : io->os_Status;
 }
 
+/* PARALLEL: count echoes with up to n in flight at once, as a cluster of
+ * Cradles would share them. */
+static void parallel(struct OSRequest *opened, UWORD handle, LONG n, LONG count)
+{
+    static struct OSRequest *ios[8];
+    static char ins[8][64], outs[8][64];
+    struct MsgPort *port = CreateMsgPort();
+    struct DateStamp t0, t1;
+    LONG sent = 0, done = 0, bad = 0, k;
+    if (n < 1)
+        n = 1;
+    if (n > 8)
+        n = 8;
+    if (!port)
+        return;
+    for (k = 0; k < n; k++) {
+        ios[k] = (struct OSRequest *)CreateIORequest(port, sizeof *ios[k]);
+        if (!ios[k])
+            return;
+        ios[k]->os_Req.io_Device = opened->os_Req.io_Device;
+        ios[k]->os_Req.io_Unit = opened->os_Req.io_Unit;
+    }
+    DateStamp(&t0);
+    for (k = 0; k < n && sent < count; k++, sent++) {
+        struct OSRequest *io = ios[k];
+        memset(ins[k], (int)sent, sizeof ins[k]);
+        memset(io->os_Buf, 0, sizeof io->os_Buf);
+        io->os_Req.io_Command = OSCMD_CALL;
+        io->os_Service = handle;
+        io->os_Op = 1;
+        io->os_Flags = 2;
+        io->os_Buf[0].ob_Data = ins[k];
+        io->os_Buf[0].ob_Length = sizeof ins[k];
+        io->os_Buf[1].ob_Data = outs[k];
+        io->os_Buf[1].ob_Length = sizeof outs[k];
+        SendIO((struct IORequest *)io);
+    }
+    while (done < sent) {
+        struct OSRequest *io;
+        WaitPort(port);
+        while ((io = (struct OSRequest *)GetMsg(port))) {
+            k = 0;
+            while (ios[k] != io)
+                k++;
+            done++;
+            if (io->os_Status || memcmp(ins[k], outs[k], sizeof ins[k]))
+                bad++;
+            if (sent < count) {
+                memset(ins[k], (int)sent, sizeof ins[k]);
+                memset(outs[k], 0, sizeof outs[k]);
+                SendIO((struct IORequest *)io);
+                sent++;
+            }
+        }
+    }
+    DateStamp(&t1);
+    {
+        LONG ticks = (t1.ds_Days - t0.ds_Days) * 86400 * 50 + (t1.ds_Minute - t0.ds_Minute) * 3000 + (t1.ds_Tick - t0.ds_Tick);
+        printf("parallel %ld: %ld calls, %ld bad, %ld ms\n", (long)n, (long)count, (long)bad, (long)ticks * 20);
+    }
+    for (k = 0; k < n; k++)
+        DeleteIORequest((struct IORequest *)ios[k]);
+    DeleteMsgPort(port);
+}
+
 int main(void)
 {
-    LONG args[2] = { 0, 0 };
-    struct RDArgs *rd = ReadArgs((CONST_STRPTR)"NAME,COUNT/N", args, NULL);
+    LONG args[3] = { 0, 0, 0 };
+    struct RDArgs *rd = ReadArgs((CONST_STRPTR)"NAME,COUNT/N,PARALLEL/N", args, NULL);
     const char *name = args[0] ? (const char *)args[0] : "echo/1";
     LONG count = args[1] ? *(LONG *)args[1] : 100, i, bad = 0, status;
     struct MsgPort *port = CreateMsgPort();
@@ -96,6 +161,8 @@ int main(void)
         printf("echo: %ld calls, %ld bad, %ld ms, %ld us each\n", (long)count, (long)bad, (long)ticks * 20,
                count ? (long)(ticks * 20000 / count) : 0L);
     }
+    if (args[2])
+        parallel(io, handle, *(LONG *)args[2], count);
     io->os_Service = handle;
     run(io, OSCMD_CLOSE);
     CloseDevice((struct IORequest *)io);

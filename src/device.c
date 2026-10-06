@@ -161,7 +161,7 @@ static void cardStop(void)
 /* ---- what is in flight ---------------------------------------------------- */
 
 enum { WHERE_NONE, WHERE_CARD = OSWHERE_CARD, WHERE_LAN = OSWHERE_LAN };
-enum { KIND_USER, KIND_OPEN, KIND_LIST, KIND_INTERNAL };
+enum { KIND_USER, KIND_OPEN, KIND_LIST, KIND_INTERNAL, KIND_JOIN };
 
 #define MAX_PENDING 64
 #define MAX_HANDLES 32
@@ -171,13 +171,19 @@ struct pending {
     struct OSRequest *io;            /* NULL: free, or internal */
     ULONG id;
     UBYTE kind, where, conn, cancelSent;
+    UBYTE handle;                    /* KIND_JOIN: the handle it joins */
 };
 static struct pending pending[MAX_PENDING];
 static ULONG nextId = 1;
 
+/* A LAN handle can be open on several Cradles (a cluster): each call goes
+ * to the one with the fewest requests in flight. */
 struct handle {
     UBYTE where, conn;
     UWORD remote;
+    UBYTE more;                      /* other Cradles it is open on */
+    UBYTE moreConn[MAX_CONNS];
+    UWORD moreRemote[MAX_CONNS];
 };
 static struct handle handles[MAX_HANDLES];   /* local handle = index + 1 */
 
@@ -441,6 +447,26 @@ static int connect3s(ULONG address, UWORD port)
     return s;
 }
 
+static int lanConnect(const struct mdns_cradle *cr)
+{
+    int c, free = -1;
+    for (c = 0; c < MAX_CONNS; c++) {
+        if (conns[c].socket >= 0 && conns[c].address == cr->address && conns[c].port == cr->port)
+            return c;
+        if (conns[c].socket < 0 && free < 0)
+            free = c;
+    }
+    if (free < 0)
+        return -1;
+    conns[free].socket = connect3s(cr->address, cr->port);
+    if (conns[free].socket < 0)
+        return -1;
+    conns[free].address = cr->address;
+    conns[free].port = cr->port;
+    conns[free].users = 0;
+    return free;
+}
+
 /* The connection to a paired Cradle offering name, opened when needed. */
 static int lanFor(const char *name)
 {
@@ -466,26 +492,62 @@ static int lanFor(const char *name)
     }
     for (i = 0; i < cradleCount; i++) {
         struct mdns_cradle *cr = &cradles[i];
-        int free = -1;
         if (!cr->address || !mdns_offers(cr, name) || !openservice_paired(cr->fingerprint))
             continue;
-        for (c = 0; c < MAX_CONNS; c++) {
-            if (conns[c].socket >= 0 && conns[c].address == cr->address && conns[c].port == cr->port)
-                return c;
-            if (conns[c].socket < 0 && free < 0)
-                free = c;
-        }
-        if (free < 0)
-            return -1;
-        conns[free].socket = connect3s(cr->address, cr->port);
-        if (conns[free].socket < 0)
-            continue;
-        conns[free].address = cr->address;
-        conns[free].port = cr->port;
-        conns[free].users = 0;
-        return free;
+        if ((c = lanConnect(cr)) >= 0)
+            return c;
     }
     return -1;
+}
+
+/* After a handle opened on one Cradle: open it on every other paired Cradle
+ * offering the service too (KIND_JOIN), so calls can be spread. io carries
+ * the name and is only read here. */
+static int lanSubmit(struct pending *p, int c, UWORD service, UWORD op, const struct OSRequest *io, ULONG arg);
+static struct pending *newPending(struct OSRequest *io, int kind, int where, int conn);
+static void joinOthers(int h, const struct OSRequest *io)
+{
+    char name[64];
+    ULONG n = io->os_Buf[0].ob_Length;
+    int i, c;
+    if (n > sizeof name - 1)
+        n = sizeof name - 1;
+    memcpy(name, io->os_Buf[0].ob_Data, n);
+    name[n] = 0;
+    for (i = 0; i < cradleCount; i++) {
+        struct mdns_cradle *cr = &cradles[i];
+        struct pending *p;
+        if (!cr->address || !mdns_offers(cr, name) || !openservice_paired(cr->fingerprint))
+            continue;
+        c = lanConnect(cr);
+        if (c < 0 || c == handles[h].conn)
+            continue;
+        p = newPending(NULL, KIND_JOIN, WHERE_LAN, c);
+        if (!p)
+            return;
+        p->handle = (UBYTE)h;
+        if (!lanSubmit(p, c, 0, DIR_OPEN, io, 0))
+            p->id = 0;
+    }
+}
+
+/* Of the Cradles a handle is open on, the one with the fewest requests out. */
+static int quietest(const struct handle *hd, UWORD *remote)
+{
+    int best = hd->conn, bestLoad = 0x7fff, k, i;
+    *remote = hd->remote;
+    for (k = -1; k < (int)hd->more; k++) {
+        int c = k < 0 ? hd->conn : hd->moreConn[k], load = 0;
+        for (i = 0; i < MAX_PENDING; i++)
+            if (pending[i].id && pending[i].where == WHERE_LAN && pending[i].conn == c)
+                load++;
+        if (load < bestLoad) {
+            bestLoad = load;
+            best = c;
+            *remote = k < 0 ? hd->remote : hd->moreRemote[k];
+        }
+    }
+    return best;
 }
 
 static void connLost(int c)
@@ -497,9 +559,25 @@ static void connLost(int c)
     for (i = 0; i < MAX_PENDING; i++)
         if (pending[i].id && pending[i].where == WHERE_LAN && pending[i].conn == c)
             completed(&pending[i], OSERR_LOST, 0, 0);
-    for (i = 0; i < MAX_HANDLES; i++)
-        if (handles[i].where == WHERE_LAN && handles[i].conn == c)
-            handles[i].where = WHERE_NONE;
+    for (i = 0; i < MAX_HANDLES; i++) {
+        struct handle *hd = &handles[i];
+        int k;
+        if (hd->where != WHERE_LAN)
+            continue;
+        for (k = 0; k < hd->more; k++)
+            if (hd->moreConn[k] == c) {
+                hd->moreConn[k] = hd->moreConn[hd->more - 1];
+                hd->moreRemote[k] = hd->moreRemote[--hd->more];
+                k--;
+            }
+        if (hd->conn == c) {
+            if (hd->more) {              /* another Cradle carries on */
+                hd->conn = hd->moreConn[--hd->more];
+                hd->remote = hd->moreRemote[hd->more];
+            } else
+                hd->where = WHERE_NONE;
+        }
+    }
     browsedAt = 0;
 }
 
@@ -522,6 +600,16 @@ static void completed(struct pending *p, LONG status, ULONG result, ULONG aux)
         listNext(io);
         return;
     }
+    if (p->kind == KIND_JOIN) {
+        struct handle *hd = &handles[p->handle];
+        if (status == OSERR_OK && hd->where == WHERE_LAN && hd->more < MAX_CONNS && hd->conn != p->conn) {
+            hd->moreConn[hd->more] = p->conn;
+            hd->moreRemote[hd->more++] = (UWORD)result;
+            conns[p->conn].users++;
+        }
+        p->id = 0;
+        return;
+    }
     if (io && p->kind == KIND_OPEN) {
         if (status == OSERR_OK) {
             for (i = 0; i < MAX_HANDLES && handles[i].where; i++)
@@ -532,8 +620,11 @@ static void completed(struct pending *p, LONG status, ULONG result, ULONG aux)
                 handles[i].where = p->where;
                 handles[i].conn = p->conn;
                 handles[i].remote = (UWORD)result;
-                if (p->where == WHERE_LAN)
+                handles[i].more = 0;
+                if (p->where == WHERE_LAN) {
                     conns[p->conn].users++;
+                    joinOthers(i, io);
+                }
                 result = i + 1;
             }
         } else if (status == OSERR_NOSERVICE && p->where == WHERE_CARD && p->conn + 1 < boardCount) {
@@ -628,6 +719,14 @@ static void doClose(struct OSRequest *io)
     }
     if (hd->where == WHERE_LAN && conns[hd->conn].users)
         conns[hd->conn].users--;
+    while (hd->where == WHERE_LAN && hd->more) {      /* and on the other Cradles */
+        int c = hd->moreConn[--hd->more];
+        p = newPending(NULL, KIND_INTERNAL, WHERE_LAN, c);
+        if (p)
+            lanSubmit(p, c, 0, DIR_CLOSE, NULL, hd->moreRemote[hd->more]);
+        if (conns[c].users)
+            conns[c].users--;
+    }
     hd->where = WHERE_NONE;
     finish(io, OSERR_OK, 0, 0);
 }
@@ -645,12 +744,23 @@ static void listLan(struct OSRequest *io)
             const char *s = cradles[i].services;
             if (!openservice_paired(cradles[i].fingerprint))
                 continue;
-            while (*s && used < room) {
-                out[used++] = *s == ',' ? 0 : *s;
-                s++;
+            while (*s) {                  /* each name once, though several Cradles offer it */
+                const char *end = strchr(s, ',');
+                ULONG len = end ? (ULONG)(end - s) : strlen(s), at = 0;
+                int seen = 0;
+                while (at < used) {
+                    ULONG have = strlen(out + at);
+                    if (have == len && !strncmp(out + at, s, len))
+                        seen = 1;
+                    at += have + 1;
+                }
+                if (!seen && used + len + 1 <= room) {
+                    memcpy(out + used, s, len);
+                    used += len;
+                    out[used++] = 0;
+                }
+                s += len + (end ? 1 : 0);
             }
-            if (used < room)
-                out[used++] = 0;
         }
     }
     finish(io, OSERR_OK, used, 0);
@@ -700,12 +810,16 @@ static void doCall(struct OSRequest *io)
         return;
     }
     hd = &handles[h - 1];
-    p = newPending(io, KIND_USER, hd->where, hd->conn);
-    if (!p) {
-        finish(io, OSERR_HOST, 0, 0);
-        return;
+    {
+        UWORD remote = hd->remote;
+        int c = hd->where == WHERE_LAN && hd->more ? quietest(hd, &remote) : hd->conn;
+        p = newPending(io, KIND_USER, hd->where, c);
+        if (!p) {
+            finish(io, OSERR_HOST, 0, 0);
+            return;
+        }
+        submit(p, io, remote, io->os_Op);
     }
-    submit(p, io, hd->remote, io->os_Op);
 }
 
 static void dispatch(struct OSRequest *io)
