@@ -21,10 +21,24 @@
 /* The first longword at the board's base. */
 #define OPENSERVICE_MAGIC 0x41435356UL        /* "ACSV" */
 
-/* Fingerprints of the Cradles this Amiga has paired with, one per line. */
+/* The Cradles this Amiga has paired with, one per line: the Cradle's
+ * fingerprint (its mDNS fp=), then, when paired with a code, the key in hex
+ * and its name. A line with the fingerprint alone allows unsealed frames
+ * (test Cradles started with --allow-plain). */
 #define OPENSERVICE_PAIRED_FILE "ENV:OpenService/Paired"
+#define OPENSERVICE_PAIRED_KEEP "ENVARC:OpenService/Paired"
+
+/* This Amiga's identity, 16 bytes in hex, made by the first pairing. */
+#define OPENSERVICE_ID_FILE "ENV:OpenService/ID"
+#define OPENSERVICE_ID_KEEP "ENVARC:OpenService/ID"
 
 /* 1 when this fingerprint is in OPENSERVICE_PAIRED_FILE. */
 int openservice_paired(const char *fingerprint);
+
+/* 1 with the key when it was paired with a code. */
+int openservice_psk(const char *fingerprint, unsigned char key[32]);
+
+int openservice_amiga_id(unsigned char id[16]);
+int openservice_hex(const char *text, unsigned char *out, int length);
 
 #endif

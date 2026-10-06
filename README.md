@@ -54,10 +54,11 @@ handshake, and with no service the work is done locally.
 
 ## Pairing
 
-The device uses only Cradles whose fingerprint (their mDNS `fp=` value) is
-listed in `ENV:OpenService/Paired`, one per line (copy it to ENVARC: to keep
-it). Nursery shows each Cradle's fingerprint state. The LAN connection is not
-encrypted yet; that comes with pairing by code.
+`Nursery PAIR=<Cradle>` pairs this Amiga with a Cradle: both show a
+six-digit code, and once they match the Cradle's services are sealed with
+the key they agreed (ChaCha20-Poly1305). `docs/PAIRING.md` has the details.
+A paired service is opened on every paired Cradle that offers it, and each
+call goes to the least busy one, so a cluster of Cradles shares the work.
 
 ## Building
 
