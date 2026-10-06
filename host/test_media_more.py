@@ -30,6 +30,16 @@ with tempfile.TemporaryDirectory() as tmp:
     st, w, h, px = call(DECODE, data, room=48 * 48 * 4)
     assert (st, w, h, tuple(px[:4])) == (0, 48, 48, (255, 0, 255, 0)), (st, w, h, tuple(px[:4]))
     print("ico: the largest of two icons, 48x48")
+    # A 256x256 icon is stored as PNG, whose size FFmpeg learns only by
+    # decoding; the file's directory still picks it. A transparent icon says so.
+    subprocess.run(["convert", "-size", "16x16", "xc:blue", "(", "-size", "256x256", "xc:none", "-fill", "red",
+                    "-draw", "rectangle 64,64 191,191", ")", ico], check=True)
+    data = open(ico, "rb").read()
+    st, w, h, info = call(PROBE, data)
+    assert (st, w, h) == (0, 256, 256) and struct.unpack(">I", info[8:12])[0] & 1, (st, w, h, info[8:12])
+    st, w, h, px = call(DECODE, data, room=256 * 256 * 4)
+    assert (st, w, h) == (0, 256, 256) and tuple(px[:4])[0] == 0 and tuple(px[(128 * 256 + 128) * 4:][:4]) == (255, 255, 0, 0)
+    print("ico: a 256x256 PNG icon beside a 16x16 one, transparent, says alpha")
 
     # A font comes back as ImageMagick's sample sheet.
     fonts = sorted(glob.glob("/usr/share/fonts/**/*.ttf", recursive=True))
@@ -56,3 +66,25 @@ with tempfile.TemporaryDirectory() as tmp:
         st, w, h, info = call(PROBE, data)
         assert (st, w, h) == (0, 64, 48), (ext, st, w, h)
         print(f"{ext}: 5 frames at 5 fps, 64x48, frame 2 drawn; PROBE gives the first frame")
+
+    # A GIF whose middle frame lasts five times as long: played at the
+    # shortest frame's rate, the long one repeated.
+    frames = []
+    for i, colour in enumerate(("red", "#00ff00", "blue")):
+        f = os.path.join(tmp, f"f{i}.png")
+        subprocess.run(["convert", "-size", "32x24", "xc:" + colour, f], check=True)
+        frames += ["-delay", "50" if i == 1 else "10", f]
+    gif = os.path.join(tmp, "uneven.gif")
+    subprocess.run(["convert"] + frames + ["-loop", "0", gif], check=True)
+    st, handle, fps, info = call(VOPEN, open(gif, "rb").read(), w=160, h=160)
+    frames_out = struct.unpack(">6I", info)[3]
+    assert (st, fps, frames_out) == (0, 10000, 7), (st, fps, frames_out)
+    seen = []
+    for i in range(7):
+        st, got, _, out = md.call(VFRAME, handle, [i, 1, 0, 0], 2, [None] * 4, [0, 32 * 24 * 3, 0, 0])
+        assert st == 0 and got == i, (i, st, got)
+        seen.append(tuple(out[1][:3]))
+    md.call(VCLOSE, handle, [0, 0, 0, 0], 2, [None] * 4, [0, 0, 0, 0])
+    red, green, blue = (255, 0, 0), (0, 255, 0), (0, 0, 255)
+    assert seen == [red] + [green] * 5 + [blue], seen
+    print("gif: 0.1 s, 0.5 s, 0.1 s frames play as 7 frames at 10 fps, the long one held")

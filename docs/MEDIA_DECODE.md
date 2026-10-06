@@ -135,3 +135,9 @@ i / 36, green i / 6 % 6, blue i % 6, each step 51; 216 to 255 a grey ramp,
 unused here), with 4x4 ordered dithering. In 24-bit it is R, G, B bytes.
 Frames asked for in order are decoded straight on; going back, or jumping
 more than 50 frames ahead, seeks to the key frame before.
+
+Frames that last unevenly (a GIF or APNG holding one picture longer, or a
+variable-rate video) are given at one steady rate: the shortest frame's, at
+most 50 a second, each picture repeated for as long as it lasts. `frames`
+and the rate VOPEN gives count those steady frames, so the Amiga plays
+them by its clock as it plays any video.
