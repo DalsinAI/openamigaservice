@@ -87,3 +87,7 @@ another PC: 500 `echo/1` calls, all correct, 2.2 ms each.
 ## Licence
 
 MIT, Copyright (c) 2026 Dalsin Limited. See LICENSE.
+
+## Contributors
+
+Nursery is created and maintained by [SacredTrees](https://github.com/SacredTrees) with the AmigaChrome agent team, copyright Dalsin Limited. Everyone whose work it includes is credited in [`CONTRIBUTORS.md`](CONTRIBUTORS.md).
