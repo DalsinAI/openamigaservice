@@ -11,13 +11,13 @@ mkdir -p "$HERE/bin" "$HERE/obj"
 cd "$HERE"
 # The device: its own ROMTag, no C library start-up; start.c is linked first.
 for f in start device mdns paired oscrypto osrandom; do
-    "$CC" -m68020 -Os -Wall -fomit-frame-pointer -Iinclude -c src/$f.c -o obj/$f.o
+    "$CC" -m68020 -Os -fno-delete-null-pointer-checks -Wall -fomit-frame-pointer -Iinclude -c src/$f.c -o obj/$f.o
 done
 "$CC" -nostartfiles -m68020 -o bin/openservice.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
     -lamiga -Wl,-Map=obj/openservice.device.map
-"$CC" -m68020 -mcrt=nix20 -Os -Wall -Iinclude -o bin/Nursery src/nursery.c src/mdns.c src/paired.c src/oscrypto.c src/osrandom.c -lamiga
-"$CC" -m68020 -mcrt=nix20 -Os -Wall -Iinclude -o bin/ServiceTest src/servicetest.c -lamiga
-"$CC" -m68020 -mcrt=nix20 -Os -Wall -Iinclude -o bin/ToCDXL src/tocdxl.c -lamiga
+"$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/Nursery src/nursery.c src/mdns.c src/paired.c src/oscrypto.c src/osrandom.c -lamiga
+"$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ServiceTest src/servicetest.c -lamiga
+"$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ToCDXL src/tocdxl.c -lamiga
 # The host side (Linux, OpenSSL 3), for the LAN Cradle and the emulator.
 if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
