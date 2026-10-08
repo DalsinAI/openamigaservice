@@ -72,7 +72,7 @@ static void listBoards(void)
         if ((cd->cd_Rom.er_Type & ERTF_MEMLIST) || (cd->cd_Flags & CDF_SHUTUP) || regs[0] != OPENSERVICE_MAGIC)
             continue;
         printf("Board:   %s (product %u) at $%08lx, version %lu%s\n", className(regs[8]), cd->cd_Rom.er_Product,
-               (unsigned long)cd->cd_BoardAddr, (unsigned long)regs[1], regs[7] & 1 ? ", runs on this machine's host" : "");
+               (unsigned long)cd->cd_BoardAddr, (unsigned long)regs[1], regs[7] & 1 ? ", runs on the x86 or ARM64 cores" : "");
         any = 1;
     }
     if (!any)
