@@ -12,8 +12,8 @@ Programs ask by name and do not know where the work runs:
 
 - **On a board in this machine.** Every Dalsin AutoConfig board with the
   services block: the services card, CPU cores, FPU or TPU boards. On
-  AmigaChrome (a PC, or our appliance) these are virtual and the work runs on
-  the host's own CPU.
+  AmigaChrome (on x86 cores, or the appliance) these are virtual and the work runs on
+  the x86 or ARM64 cores.
 - **On a Cradle on the LAN.** A real Amiga with no such board asks over mDNS
   which Cradle offers the service, and uses it once paired.
 - **Nowhere.** OPEN fails, and the program does the work itself on the 68k.
@@ -82,7 +82,7 @@ each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and
 LibreOffice.
 
 Measured on AmigaOS 3.2.3 (AmigaChrome, OpenSocket) against a Cradle on
-another PC: 500 `echo/1` calls, all correct, 2.2 ms each.
+other x86 cores: 500 `echo/1` calls, all correct, 2.2 ms each.
 
 ## Licence
 
