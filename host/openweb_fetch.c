@@ -14,6 +14,25 @@
  * socket is closed only by the thread, under the fetch's mutex, so CANCEL
  * (shutdown, under the same mutex) never reaches a reused descriptor.
  *
+ * Held calls (wf_start): a HEAD or READ with nothing to give yet is kept on
+ * its fetch, under the fetch's mutex, and answered by whichever thread
+ * changes what it waits for (the fetch's thread, a CANCEL or CLOSE), or by
+ * the timer thread when its wait runs out; wf_cancel answers it at once.
+ * CANCEL and CLOSE answer every held call of their fetch, so none outlives
+ * its slot. The card's completion is called under the fetch's mutex; it
+ * takes only the card's own lock and never calls back in.
+ *
+ * Kept connections: after an answer framed by its length or chunks, read to
+ * its end, with neither side asking to close, the connection goes to a
+ * pool (per scheme, host and port: at most KEEP_PER_HOST, KEEP_MAX in all)
+ * and the next fetch to the same place without a body takes it. A kept
+ * connection is checked before it is used; one the server closed in the
+ * meantime is dropped, and if it fails before a byte of the answer comes,
+ * the request goes again on a new connection. The timer thread closes those
+ * idle for KEEP_IDLE seconds, or the server's Keep-Alive timeout if less.
+ * A fetch's descriptor is set to -1 under its mutex before its connection
+ * is kept, so a late CANCEL never reaches the next fetch on it.
+ *
  * MIT, Copyright (c) 2026 Dalsin Limited.
  */
 #define _GNU_SOURCE
@@ -57,11 +76,25 @@
 #define IDLE_CLOSE   600           /* seconds untouched before the host closes a fetch itself */
 #define IOBUF        16384u
 #define INFO_ROOM    1536u
+#define KEEP_PER_HOST 6            /* idle connections kept for one scheme, host and port */
+#define KEEP_MAX     32            /* idle connections kept in all */
+#define KEEP_IDLE    30            /* seconds one is kept idle, unless the server's Keep-Alive says less */
 
 struct piece {
     struct piece *next;
     uint32_t length;
     uint8_t data[];
+};
+
+/* A HEAD or READ held for wf_start (under its fetch's mutex). */
+struct held {
+    struct held *next;
+    uint32_t id;                /* the card's */
+    uint16_t op;
+    uint8_t *out;               /* buf[0].out: the card's copy, ours until done */
+    uint32_t room;
+    struct timespec until;      /* the wait runs out */
+    wf_done_fn done;
 };
 
 struct fetch {
@@ -98,11 +131,16 @@ struct fetch {
     uint32_t r_at, r_len;
     uint64_t body_total;        /* bytes put in the window */
     int body_done;              /* nothing more will come (error says whether it failed) */
+    struct held *held;          /* calls waiting to be answered, oldest first */
 };
 
 static pthread_mutex_t table_mtx = PTHREAD_MUTEX_INITIALIZER;
 static struct { struct fetch *f; uint32_t gen; } slots[MAX_FETCHES];
 static int threads_running;
+
+static void serve_held_locked(struct fetch *f, const struct timespec *now);
+static int timer_ready(void);
+static void timer_poke_at(const struct timespec *t);
 
 static pthread_once_t tls_once = PTHREAD_ONCE_INIT;
 static SSL_CTX *tls_ctx;
@@ -110,6 +148,11 @@ static SSL_CTX *tls_ctx;
 static void put32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v;
+}
+
+static int ts_before(const struct timespec *a, const struct timespec *b)
+{
+    return a->tv_sec < b->tv_sec || (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec);
 }
 
 static struct timespec deadline_ms(uint32_t ms)
@@ -134,6 +177,12 @@ static time_t now_s(void)
 
 static void fetch_free(struct fetch *f)
 {
+    while (f->held) {                           /* none should be left (CANCEL and CLOSE answer them); never leave one unanswered */
+        struct held *h = f->held;
+        f->held = h->next;
+        h->done(h->id, WF_CALL_CANCELLED, 0, 0);
+        free(h);
+    }
     while (f->up_head) {
         struct piece *p = f->up_head;
         f->up_head = p->next;
@@ -178,6 +227,15 @@ static struct fetch *lookup(uint32_t handle)
     return f;
 }
 
+/* Under f->mtx: something a HEAD or READ waits for changed. Wakes the calls
+ * waiting on a worker and answers the held ones that can be answered now. */
+static void changed_locked(struct fetch *f)
+{
+    pthread_cond_broadcast(&f->cv);
+    if (f->held)
+        serve_held_locked(f, NULL);
+}
+
 /* Under f->mtx: the fetch stops. A failure before the end keeps its first error. */
 static void cancel_locked(struct fetch *f)
 {
@@ -191,7 +249,7 @@ static void cancel_locked(struct fetch *f)
     }
     if (f->fd >= 0)
         shutdown(f->fd, SHUT_RDWR);
-    pthread_cond_broadcast(&f->cv);
+    changed_locked(f);                          /* every held call: a cancelled fetch has its answer */
 }
 
 /* Under f->mtx, from the thread: the fetch failed with err; why is one line. */
@@ -203,7 +261,7 @@ static void fail_locked(struct fetch *f, uint32_t err, const char *why)
         snprintf(f->info + n, sizeof f->info - n, "error=%s\n", why);
     }
     f->body_done = 1;
-    pthread_cond_broadcast(&f->cv);
+    changed_locked(f);
 }
 
 static void fail(struct fetch *f, uint32_t err, const char *why)
@@ -302,7 +360,11 @@ struct conn {
     int fd;
     SSL *ssl;
     int timedout;
+    int reused;                 /* taken from the pool for this request (and not failed over yet) */
+    int heard;                  /* a byte has come on it for this request */
+    int spent;                  /* it ended unclean (a chunked body's trailers cut off): not kept */
     uint32_t pos, len;
+    char tls[INFO_ROOM];        /* the info lines of its handshake, kept with it */
     uint8_t buf[IOBUF];
 };
 
@@ -384,8 +446,10 @@ static int conn_fill(struct conn *c)
     if (c->len == sizeof c->buf)
         return -1;
     r = conn_read(c, c->buf + c->len, (int)(sizeof c->buf - c->len));
-    if (r > 0)
+    if (r > 0) {
         c->len += (uint32_t)r;
+        c->heard = 1;
+    }
     return r;
 }
 
@@ -573,17 +637,18 @@ static int handshake(struct fetch *f, struct conn *c)
             summarise_locked(f, cert);
         }
         f->body_done = 1;
-        pthread_cond_broadcast(&f->cv);
+        changed_locked(f);
         pthread_mutex_unlock(&f->mtx);
         X509_free(cert);
         return -1;
     }
     {
-        size_t n = strlen(f->info);
+        size_t n0 = strlen(f->info), n = n0;
         snprintf(f->info + n, sizeof f->info - n, "tls=%s\ncipher=%s\n", SSL_get_version(c->ssl), SSL_get_cipher_name(c->ssl));
         summarise_locked(f, cert);
         n = strlen(f->info);
         snprintf(f->info + n, sizeof f->info - n, "verified=yes\n");
+        snprintf(c->tls, sizeof c->tls, "%s", f->info + n0);   /* given again with each fetch on a kept connection */
     }
     pthread_mutex_unlock(&f->mtx);
     X509_free(cert);
@@ -643,12 +708,23 @@ static void upload_closed(struct fetch *f)
     pthread_mutex_unlock(&f->mtx);
 }
 
+/* A kept connection failed before a byte of the answer came (not a
+ * timeout, not a cancel): the server closed it while it was idle, so the
+ * request goes again on a new one. */
+static int stale(struct fetch *f, struct conn *c)
+{
+    return c->reused && !c->timedout && !c->heard && !is_cancelled(f);
+}
+
 /* The request's head and its body: 0, 1 when the connection broke during
- * the body (the answer may still be there), -1 when the fetch failed. */
+ * the body (the answer may still be there), -1 when the fetch failed, -3
+ * when a kept connection turned out closed (send it again on a new one). */
 static int send_request(struct fetch *f, struct conn *c)
 {
     int chunked = f->body_length == WF_LENGTH_UNKNOWN, r = 0;
     if (conn_write(c, f->request, strlen(f->request))) {
+        if (stale(f, c))
+            return -3;
         conn_fail(f, c, WF_E_CLOSED, "while sending the request");
         return -1;
     }
@@ -722,14 +798,31 @@ static int one_token(const char *v, char *out, size_t room)
     return *v == 0;
 }
 
+/* 1 when the comma-separated list v holds token tok (any case). */
+static int has_token(const char *v, const char *tok)
+{
+    size_t n = strlen(tok);
+    while (*v) {
+        while (*v == ' ' || *v == '\t' || *v == ',')
+            v++;
+        if (!strncasecmp(v, tok, n) && (!v[n] || v[n] == ',' || v[n] == ' ' || v[n] == '\t' || v[n] == ';'))
+            return 1;
+        while (*v && *v != ',')
+            v++;
+    }
+    return 0;
+}
+
 /* Reads the head (after any 1xx), and publishes it: the body's framing in
- * *mode and *length, or -1 when the fetch failed. */
-static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint64_t *length, int *decode)
+ * *mode and *length, whether the connection may be kept after the body in
+ * *keep and for how long idle in *idle; or -1 when the fetch failed, or -3
+ * when a kept connection turned out closed before a byte came. */
+static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint64_t *length, int *decode, int *keep, int *idle)
 {
     char *line = malloc(MAX_TEXT), *raw = malloc(MAX_TEXT + 2), *text = NULL, coding[32] = "";
     uint32_t status = 0, version = 11, used, tlen = 0;
     uint64_t clen = 0;
-    int have_len = 0, chunked = 0, r, bad = 0;
+    int have_len = 0, chunked = 0, r, bad = 0, rc = -1, close_it = 0, keep_alive = 0, ka_timeout = 0;
     const char *why = NULL;
 
     if (!line || !raw) {
@@ -741,6 +834,7 @@ static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint
     for (;;) {                                  /* a 1xx head is read and dropped */
         used = 0;
         have_len = chunked = 0;
+        close_it = keep_alive = ka_timeout = 0;
         coding[0] = 0;
         r = conn_line(c, line, MAX_TEXT);
         if (r == -2) {
@@ -748,6 +842,10 @@ static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint
             break;
         }
         if (r <= 0) {
+            if (stale(f, c)) {
+                rc = -3;
+                goto out;
+            }
             if (r == 0 && !c->timedout)
                 fail(f, WF_E_CLOSED, broke ? "the connection closed while sending the body" : "the connection closed before the answer");
             else
@@ -803,6 +901,13 @@ static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint
             } else if ((v = value_of(line, "content-encoding"))) {
                 if (!one_token(v, coding, sizeof coding))
                     strcpy(coding, "?");        /* two codings: left as they are */
+            } else if ((v = value_of(line, "connection"))) {
+                close_it |= has_token(v, "close");
+                keep_alive |= has_token(v, "keep-alive");
+            } else if ((v = value_of(line, "keep-alive"))) {
+                const char *t = strcasestr(v, "timeout=");
+                if (t)
+                    ka_timeout = atoi(t + 8);
             }
         }
         if (why)
@@ -867,10 +972,9 @@ static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint
     f->hlen = tlen;
     text = NULL;
     f->hflags = (f->tls ? WF_H_TLS | WF_H_VERIFIED : 0) | (*decode ? WF_H_DECODED : 0);
-    if (*mode == BODY_NONE) {
+    if (*mode == BODY_NONE) {                   /* body_done is the thread's, once the connection is kept or closed */
         f->hflags |= WF_H_NOBODY | WF_H_LENGTH;
         f->length = 0;
-        f->body_done = 1;
     } else if (*mode == BODY_LENGTH && !*decode) {
         f->hflags |= WF_H_LENGTH;
         f->length = clen;
@@ -882,8 +986,13 @@ static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint
         goto out;
     }
     f->head_ready = 1;
-    pthread_cond_broadcast(&f->cv);
+    changed_locked(f);
     pthread_mutex_unlock(&f->mtx);
+    /* Kept after the body: HTTP/1.1 unless either side said close (1.0 only
+     * when the server said keep-alive), and a body framed by its length or
+     * chunks; idle a second less than the server's Keep-Alive timeout. */
+    *keep = !close_it && (version == 11 || keep_alive) && *mode != BODY_CLOSE;
+    *idle = ka_timeout > 0 && ka_timeout <= KEEP_IDLE ? (ka_timeout > 1 ? ka_timeout - 1 : 1) : KEEP_IDLE;
     free(line);
     free(raw);
     return 0;
@@ -891,7 +1000,7 @@ out:
     free(text);
     free(line);
     free(raw);
-    return -1;
+    return rc;
 }
 
 /* ---- the body ------------------------------------------------------------------------ */
@@ -918,7 +1027,7 @@ static int push(struct fetch *f, const uint8_t *d, uint32_t n)
         f->body_total += k;
         d += k;
         n -= k;
-        pthread_cond_broadcast(&f->cv);
+        changed_locked(f);
     }
     pthread_mutex_unlock(&f->mtx);
     return 0;
@@ -1095,6 +1204,8 @@ static int read_body(struct fetch *f, struct conn *c, int mode, uint64_t length,
             if (!size) {                        /* the trailers, up to an empty line or the end */
                 while ((k = conn_line(c, line, sizeof line)) > 0 && line[0])
                     ;
+                if (k <= 0)
+                    c->spent = 1;               /* the body is whole, but the connection is not fit to keep */
                 break;
             }
             if ((r = body_bytes(f, c, s, size)))
@@ -1119,26 +1230,254 @@ static int read_body(struct fetch *f, struct conn *c, int mode, uint64_t length,
     return r;
 }
 
+/* ---- kept connections -------------------------------------------------------------------- */
+
+struct kept {
+    struct kept *next;
+    int tls, fd;
+    SSL *ssl;
+    char host[256], port[8];
+    struct timespec until;      /* closed if still idle then */
+    char info[INFO_ROOM];       /* the info lines of its handshake */
+};
+
+static pthread_mutex_t pool_mtx = PTHREAD_MUTEX_INITIALIZER;
+static struct kept *pool;       /* the newest first */
+static int pool_n;
+static pthread_once_t keep_once = PTHREAD_ONCE_INIT;
+static int keep_on;
+
+static void keep_init(void)
+{
+    const char *v = getenv("OPENWEB_FETCH_KEEP");
+    keep_on = !(v && !strcmp(v, "0"));
+}
+
+/* Connections are kept unless OPENWEB_FETCH_KEEP=0 (then v1's "Connection: close"). */
+static int keeping(void)
+{
+    pthread_once(&keep_once, keep_init);
+    return keep_on;
+}
+
+static void kept_close(struct kept *k)
+{
+    if (k->ssl) {
+        fcntl(k->fd, F_SETFL, fcntl(k->fd, F_GETFL) | O_NONBLOCK);
+        SSL_shutdown(k->ssl);                   /* close_notify, if the socket takes it now */
+        SSL_free(k->ssl);
+        ERR_clear_error();
+    }
+    close(k->fd);
+    free(k);
+}
+
+/* 1 when a kept connection still looks open: nothing to read on it, or (TLS)
+ * only records that carry no data, such as a late session ticket. */
+static int kept_alive(struct kept *k)
+{
+    struct pollfd p = { k->fd, POLLIN, 0 };
+    int r = poll(&p, 1, 0), alive;
+    char b;
+    if (r == 0)
+        return 1;
+    if (r < 0 || (p.revents & (POLLERR | POLLHUP | POLLNVAL)))
+        return 0;
+    if (!k->ssl) {
+        ssize_t n = recv(k->fd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+        return n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+    }
+    fcntl(k->fd, F_SETFL, fcntl(k->fd, F_GETFL) | O_NONBLOCK);
+    ERR_clear_error();
+    r = SSL_peek(k->ssl, &b, 1);
+    alive = r <= 0 && SSL_get_error(k->ssl, r) == SSL_ERROR_WANT_READ;
+    ERR_clear_error();
+    fcntl(k->fd, F_SETFL, fcntl(k->fd, F_GETFL) & ~O_NONBLOCK);
+    return alive;
+}
+
+/* A kept connection to f's scheme, host and port into c, ready for the
+ * request: 1, or 0 when there is none (or the fetch was cancelled). */
+static int pool_take(struct fetch *f, struct conn *c)
+{
+    for (;;) {
+        struct kept *k = NULL, **p;
+        struct timeval tv = { (time_t)f->timeout, 0 };
+        size_t n;
+        pthread_mutex_lock(&pool_mtx);
+        for (p = &pool; *p; p = &(*p)->next)
+            if ((*p)->tls == f->tls && !strcmp((*p)->host, f->host) && !strcmp((*p)->port, f->port)) {
+                k = *p;
+                *p = k->next;
+                pool_n--;
+                break;
+            }
+        pthread_mutex_unlock(&pool_mtx);
+        if (!k)
+            return 0;
+        if (!kept_alive(k)) {                   /* the server closed it while it was idle */
+            kept_close(k);
+            continue;
+        }
+        pthread_mutex_lock(&f->mtx);
+        if (f->cancelled) {
+            pthread_mutex_unlock(&f->mtx);
+            kept_close(k);
+            return 0;
+        }
+        f->fd = k->fd;                          /* so CANCEL can shut it */
+        n = strlen(f->info);
+        snprintf(f->info + n, sizeof f->info - n, "%sreused=yes\n", k->info);
+        pthread_mutex_unlock(&f->mtx);
+        setsockopt(k->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        setsockopt(k->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        c->fd = k->fd;
+        c->ssl = k->ssl;
+        snprintf(c->tls, sizeof c->tls, "%s", k->info);
+        c->reused = 1;
+        c->heard = c->spent = c->timedout = 0;
+        c->pos = c->len = 0;
+        free(k);
+        return 1;
+    }
+}
+
+/* c's connection into the pool, to be closed after idle seconds unused: 1,
+ * and c no longer has it; 0 when the fetch was cancelled (c keeps it). */
+static int pool_put(struct fetch *f, struct conn *c, int idle)
+{
+    struct kept *k = calloc(1, sizeof *k), *gone = NULL, **p, **last = NULL, **last_same = NULL;
+    struct timespec until;
+    int same = 0;
+    if (!k)
+        return 0;
+    pthread_mutex_lock(&f->mtx);
+    if (f->cancelled || f->error) {
+        pthread_mutex_unlock(&f->mtx);
+        free(k);
+        return 0;
+    }
+    f->fd = -1;                                 /* a late CANCEL no longer reaches it */
+    pthread_mutex_unlock(&f->mtx);
+    k->tls = f->tls;
+    k->fd = c->fd;
+    k->ssl = c->ssl;
+    snprintf(k->host, sizeof k->host, "%s", f->host);
+    snprintf(k->port, sizeof k->port, "%s", f->port);
+    snprintf(k->info, sizeof k->info, "%s", c->tls);
+    k->until = until = deadline_ms((uint32_t)idle * 1000);
+    c->fd = -1;
+    c->ssl = NULL;
+    pthread_mutex_lock(&pool_mtx);
+    for (p = &pool; *p; p = &(*p)->next) {
+        if ((*p)->tls == k->tls && !strcmp((*p)->host, k->host) && !strcmp((*p)->port, k->port)) {
+            same++;
+            last_same = p;
+        }
+        last = p;
+    }
+    if (same >= KEEP_PER_HOST) {                /* the oldest to the same place goes */
+        gone = *last_same;
+        *last_same = gone->next;
+        pool_n--;
+    } else if (pool_n >= KEEP_MAX) {            /* the oldest of all goes */
+        gone = *last;
+        *last = NULL;
+        pool_n--;
+    }
+    k->next = pool;
+    pool = k;
+    pool_n++;
+    pthread_mutex_unlock(&pool_mtx);
+    if (gone)
+        kept_close(gone);
+    timer_poke_at(&until);
+    return 1;
+}
+
+/* Under no lock, from the timer: kept connections idle past their time are
+ * closed; *next comes forward to the next one's. */
+static void pool_expire(const struct timespec *now, struct timespec *next)
+{
+    struct kept *gone = NULL, **p, *k;
+    pthread_mutex_lock(&pool_mtx);
+    for (p = &pool; (k = *p); ) {
+        if (!ts_before(now, &k->until)) {
+            *p = k->next;
+            pool_n--;
+            k->next = gone;
+            gone = k;
+            continue;
+        }
+        if (ts_before(&k->until, next))
+            *next = k->until;
+        p = &k->next;
+    }
+    pthread_mutex_unlock(&pool_mtx);
+    while ((k = gone)) {
+        gone = k->next;
+        kept_close(k);
+    }
+}
+
+/* A kept connection that turned out closed before a byte of the answer:
+ * it goes, and the fetch starts again on a new one. */
+static void drop_stale(struct fetch *f, struct conn *c)
+{
+    if (c->ssl)
+        SSL_free(c->ssl);
+    ERR_clear_error();
+    pthread_mutex_lock(&f->mtx);
+    if (f->fd >= 0)
+        close(f->fd);
+    f->fd = -1;
+    if (!f->error)
+        f->info[0] = 0;                         /* the new connection's own lines follow */
+    pthread_mutex_unlock(&f->mtx);
+    c->fd = -1;
+    c->ssl = NULL;
+    c->reused = c->heard = c->spent = c->timedout = 0;
+    c->pos = c->len = 0;
+    c->tls[0] = 0;
+}
+
 /* ---- the fetch's thread ---------------------------------------------------------------- */
 
 static void run(struct fetch *f, struct conn *c)
 {
-    int mode = BODY_NONE, decode = 0, broke;
+    int mode = BODY_NONE, decode = 0, broke = 0, keep = 0, idle = KEEP_IDLE, r = 0;
     uint64_t length = 0;
+    /* A request with a body never goes on a kept connection: if the server
+     * had closed it, the body could not be sent again. */
+    int take = keeping() && !(f->flags & WF_BODY);
 
-    if ((c->fd = dial(f)) < 0)
-        return;
-    if (f->tls && handshake(f, c))
-        return;
-    if ((broke = send_request(f, c)) < 0)
-        return;
-    if (read_head(f, c, broke, &mode, &length, &decode))
-        return;
+    for (;;) {
+        if (!(take && pool_take(f, c))) {
+            if ((c->fd = dial(f)) < 0)
+                return;
+            if (f->tls && handshake(f, c))
+                return;
+        }
+        take = 0;
+        broke = send_request(f, c);
+        if (broke >= 0)
+            r = read_head(f, c, broke, &mode, &length, &decode, &keep, &idle);
+        if (broke == -3 || r == -3) {           /* a kept connection the server had closed: once more, on a new one */
+            drop_stale(f, c);
+            r = 0;
+            continue;
+        }
+        if (broke < 0 || r)
+            return;
+        break;
+    }
     if (mode != BODY_NONE && read_body(f, c, mode, length, decode))
         return;
+    if (keep && keeping() && timer_ready() && !broke && !c->spent && c->pos == c->len && !(c->ssl && SSL_pending(c->ssl)))
+        pool_put(f, c, idle);
     pthread_mutex_lock(&f->mtx);
     f->body_done = 1;
-    pthread_cond_broadcast(&f->cv);
+    changed_locked(f);
     pthread_mutex_unlock(&f->mtx);
 }
 
@@ -1170,7 +1509,7 @@ static void *fetch_thread(void *arg)
         if (!f->error)
             f->error = WF_E_CANCELLED;
     }
-    pthread_cond_broadcast(&f->cv);
+    changed_locked(f);
     pthread_mutex_unlock(&f->mtx);
     free(c);
     ERR_clear_error();
@@ -1363,7 +1702,7 @@ static int parse_request(struct fetch *f, const uint8_t *text, uint32_t n)
         int k = snprintf(tail, sizeof tail, "%s%s%s",
                          ua ? "" : "User-Agent: OpenWeb-Fetch/1\r\n",
                          decode ? "Accept-Encoding: " ACCEPT_ENCODING "\r\n" : "",
-                         "Connection: close\r\n");
+                         keeping() ? "Connection: keep-alive\r\n" : "Connection: close\r\n");
         if (f->flags & WF_BODY) {
             if (f->body_length == WF_LENGTH_UNKNOWN)
                 k += snprintf(tail + k, sizeof tail - (size_t)k, "Transfer-Encoding: chunked\r\n");
@@ -1566,21 +1905,28 @@ static int op_send(uint32_t h, const uint32_t x[4], struct wf_buffer *b, uint32_
     return st;
 }
 
-static int op_head(uint32_t h, const uint32_t x[4], struct wf_buffer *b, uint32_t *result, uint32_t *aux)
+/* Under f->mtx: HEAD has its answer (the head, or the error). */
+static int head_ready_locked(struct fetch *f)
 {
-    struct fetch *f = lookup(h);
-    struct timespec until = deadline_ms(wait_of(x[0]));
+    return f->head_ready || f->error;
+}
+
+/* Under f->mtx: READ has its answer (bytes, the end, or a cancel's error). */
+static int read_ready_locked(struct fetch *f)
+{
+    return f->r_len || f->body_done || (f->cancelled && f->error);
+}
+
+/* Under f->mtx: HEAD's answer as it stands, into out (room bytes; NULL for
+ * none). Not ready: result 0 and aux 0. Returns the status. */
+static int head_answer_locked(struct fetch *f, uint8_t *out, uint32_t room, uint32_t *result, uint32_t *aux, uint32_t *written)
+{
     uint32_t tlen, ilen, need, flags, error;
     char extra[48] = "";
-    int st = WF_OK;
 
-    if (!f)
-        return WF_BADREQUEST;
-    pthread_mutex_lock(&f->mtx);
-    while (!f->head_ready && !f->error && pthread_cond_timedwait(&f->cv, &f->mtx, &until) != ETIMEDOUT)
-        ;
-    if (!f->head_ready && !f->error)
-        goto out;                               /* not yet: result 0, aux 0 */
+    *result = *aux = *written = 0;
+    if (!head_ready_locked(f))
+        return WF_OK;                           /* not yet */
     flags = f->head_ready ? f->hflags : 0;
     error = f->head_ready ? 0 : f->error;
     if (f->head_ready && f->decoded && f->body_done && !f->error) {
@@ -1590,29 +1936,88 @@ static int op_head(uint32_t h, const uint32_t x[4], struct wf_buffer *b, uint32_
     tlen = f->head_ready ? f->hlen + (uint32_t)strlen(extra) : 0;
     ilen = (uint32_t)strlen(f->info);
     need = WF_HEAD_SIZE + tlen + ilen;
-    if (!b[0].out || b[0].length < need) {
+    if (!out || room < need) {
         *result = need;
-        st = WF_TOOSMALL;
-        goto out;
+        return WF_TOOSMALL;
     }
-    put32(b[0].out, WF_HEAD_MAGIC);
-    put32(b[0].out + 4, error);
-    put32(b[0].out + 8, f->head_ready ? f->status : 0);
-    put32(b[0].out + 12, flags);
-    put32(b[0].out + 16, !(flags & WF_H_LENGTH) ? 0 : f->decoded ? (uint32_t)f->body_total
-                         : f->length > 0xffffffffu ? 0xffffffffu : (uint32_t)f->length);
-    put32(b[0].out + 20, tlen);
-    put32(b[0].out + 24, ilen);
-    put32(b[0].out + 28, f->head_ready ? f->version : 0);
+    put32(out, WF_HEAD_MAGIC);
+    put32(out + 4, error);
+    put32(out + 8, f->head_ready ? f->status : 0);
+    put32(out + 12, flags);
+    put32(out + 16, !(flags & WF_H_LENGTH) ? 0 : f->decoded ? (uint32_t)f->body_total
+                    : f->length > 0xffffffffu ? 0xffffffffu : (uint32_t)f->length);
+    put32(out + 20, tlen);
+    put32(out + 24, ilen);
+    put32(out + 28, f->head_ready ? f->version : 0);
     if (tlen) {
-        memcpy(b[0].out + WF_HEAD_SIZE, f->htext, f->hlen);
-        memcpy(b[0].out + WF_HEAD_SIZE + f->hlen, extra, strlen(extra));
+        memcpy(out + WF_HEAD_SIZE, f->htext, f->hlen);
+        memcpy(out + WF_HEAD_SIZE + f->hlen, extra, strlen(extra));
     }
-    memcpy(b[0].out + WF_HEAD_SIZE + tlen, f->info, ilen);
-    b[0].written = need;
+    memcpy(out + WF_HEAD_SIZE + tlen, f->info, ilen);
+    *written = need;
     *result = f->head_ready ? f->status : 0;
     *aux = error;
-out:
+    return WF_OK;
+}
+
+/* Under f->mtx: READ's answer as it stands, into out (room bytes): result
+ * the bytes; aux WF_END with the error once nothing more will come. */
+static void read_answer_locked(struct fetch *f, uint8_t *out, uint32_t room, uint32_t *result, uint32_t *aux, uint32_t *written)
+{
+    uint32_t k = 0;
+    *aux = 0;
+    if (!(f->cancelled && f->error) && f->r_len) {
+        uint32_t first;
+        k = f->r_len < room ? f->r_len : room;
+        first = k < WINDOW - f->r_at ? k : WINDOW - f->r_at;
+        memcpy(out, f->ring + f->r_at, first);
+        memcpy(out + first, f->ring, k - first);
+        f->r_at = (f->r_at + k) % WINDOW;
+        f->r_len -= k;
+        pthread_cond_broadcast(&f->cv);         /* room in the window */
+    }
+    *written = k;
+    *result = k;
+    if (!f->r_len && (f->body_done || (f->cancelled && f->error)))
+        *aux = WF_END | (f->error & 0xff) << 8;
+}
+
+/* Under f->mtx: the held calls that have their answer now, oldest first, and
+ * with now, those whose wait has run out ("not yet", as wf_call answers
+ * then), are answered through the card's completion. */
+static void serve_held_locked(struct fetch *f, const struct timespec *now)
+{
+    struct held **p = &f->held;
+    while (*p) {
+        struct held *h = *p;
+        uint32_t result, aux, written;
+        int st = WF_OK;
+        if (!(h->op == WF_HEAD ? head_ready_locked(f) : read_ready_locked(f)) && !(now && !ts_before(now, &h->until))) {
+            p = &h->next;
+            continue;
+        }
+        *p = h->next;
+        if (h->op == WF_HEAD)
+            st = head_answer_locked(f, h->out, h->room, &result, &aux, &written);
+        else
+            read_answer_locked(f, h->out, h->room, &result, &aux, &written);
+        h->done(h->id, st, result, aux);
+        free(h);
+    }
+}
+
+static int op_head(uint32_t h, const uint32_t x[4], struct wf_buffer *b, uint32_t *result, uint32_t *aux)
+{
+    struct fetch *f = lookup(h);
+    struct timespec until = deadline_ms(wait_of(x[0]));
+    int st;
+
+    if (!f)
+        return WF_BADREQUEST;
+    pthread_mutex_lock(&f->mtx);
+    while (!head_ready_locked(f) && pthread_cond_timedwait(&f->cv, &f->mtx, &until) != ETIMEDOUT)
+        ;
+    st = head_answer_locked(f, b[0].out, b[0].length, result, aux, &b[0].written);
     pthread_mutex_unlock(&f->mtx);
     release(f);
     return st;
@@ -1622,7 +2027,6 @@ static int op_read(uint32_t h, const uint32_t x[4], struct wf_buffer *b, uint32_
 {
     struct fetch *f = lookup(h);
     struct timespec until = deadline_ms(wait_of(x[0]));
-    uint32_t k = 0;
 
     if (!f)
         return WF_BADREQUEST;
@@ -1631,23 +2035,9 @@ static int op_read(uint32_t h, const uint32_t x[4], struct wf_buffer *b, uint32_
         return WF_BADREQUEST;
     }
     pthread_mutex_lock(&f->mtx);
-    while (!f->r_len && !f->body_done && !(f->cancelled && f->error)
-           && pthread_cond_timedwait(&f->cv, &f->mtx, &until) != ETIMEDOUT)
+    while (!read_ready_locked(f) && pthread_cond_timedwait(&f->cv, &f->mtx, &until) != ETIMEDOUT)
         ;
-    if (!(f->cancelled && f->error) && f->r_len) {
-        uint32_t first;
-        k = f->r_len < b[0].length ? f->r_len : b[0].length;
-        first = k < WINDOW - f->r_at ? k : WINDOW - f->r_at;
-        memcpy(b[0].out, f->ring + f->r_at, first);
-        memcpy(b[0].out + first, f->ring, k - first);
-        f->r_at = (f->r_at + k) % WINDOW;
-        f->r_len -= k;
-        pthread_cond_broadcast(&f->cv);         /* room in the window */
-    }
-    b[0].written = k;
-    *result = k;
-    if (!f->r_len && (f->body_done || (f->cancelled && f->error)))
-        *aux = WF_END | (f->error & 0xff) << 8;
+    read_answer_locked(f, b[0].out, b[0].length, result, aux, &b[0].written);
     pthread_mutex_unlock(&f->mtx);
     release(f);
     return WF_OK;
@@ -1701,4 +2091,179 @@ int wf_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct wf_buffer
         return WF_OK;
     }
     return WF_BADREQUEST;
+}
+
+/* ---- the timer: held calls whose wait runs out, kept connections idle too long ------------- */
+
+static pthread_mutex_t timer_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t timer_cv;
+static pthread_once_t timer_once = PTHREAD_ONCE_INIT;
+static int timer_up, timer_poked, timer_waiting;
+static struct timespec timer_next;      /* when the timer wakes, while timer_waiting */
+
+/* Every fetch in the table, each with a reference for the caller: their count. */
+static int gather(struct fetch **fs)
+{
+    int i, n = 0;
+    pthread_mutex_lock(&table_mtx);
+    for (i = 0; i < MAX_FETCHES; i++)
+        if (slots[i].f) {
+            slots[i].f->refs++;
+            fs[n++] = slots[i].f;
+        }
+    pthread_mutex_unlock(&table_mtx);
+    return n;
+}
+
+static void *timer_thread(void *arg)
+{
+    sigset_t pipe;
+    (void)arg;
+    sigemptyset(&pipe);
+    sigaddset(&pipe, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &pipe, NULL);
+    for (;;) {
+        struct fetch *fs[MAX_FETCHES];
+        struct timespec now, next;
+        int i, n;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        next = now;
+        next.tv_sec += 3600;
+        n = gather(fs);
+        for (i = 0; i < n; i++) {
+            struct held *h;
+            pthread_mutex_lock(&fs[i]->mtx);
+            if (fs[i]->held)
+                serve_held_locked(fs[i], &now);
+            for (h = fs[i]->held; h; h = h->next)
+                if (ts_before(&h->until, &next))
+                    next = h->until;
+            pthread_mutex_unlock(&fs[i]->mtx);
+            release(fs[i]);
+        }
+        pool_expire(&now, &next);
+        pthread_mutex_lock(&timer_mtx);
+        if (!timer_poked) {
+            timer_waiting = 1;
+            timer_next = next;
+            pthread_cond_timedwait(&timer_cv, &timer_mtx, &next);
+            timer_waiting = 0;
+        }
+        timer_poked = 0;
+        pthread_mutex_unlock(&timer_mtx);
+    }
+    return NULL;
+}
+
+static void timer_start(void)
+{
+    pthread_condattr_t ca;
+    pthread_attr_t attr;
+    pthread_t t;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    pthread_cond_init(&timer_cv, &ca);
+    pthread_condattr_destroy(&ca);
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&attr, 256u << 10);
+    timer_up = !pthread_create(&t, &attr, timer_thread, NULL);
+    pthread_attr_destroy(&attr);
+}
+
+/* 1 once the timer runs: without it nothing is held or kept. */
+static int timer_ready(void)
+{
+    pthread_once(&timer_once, timer_start);
+    return timer_up;
+}
+
+/* Something is due at t: the timer wakes for it if it would sleep past it. */
+static void timer_poke_at(const struct timespec *t)
+{
+    if (!timer_ready())
+        return;
+    pthread_mutex_lock(&timer_mtx);
+    if (!timer_waiting || ts_before(t, &timer_next)) {
+        timer_poked = 1;
+        pthread_cond_signal(&timer_cv);
+    }
+    pthread_mutex_unlock(&timer_mtx);
+}
+
+/* ---- answering later, for the services card ------------------------------------------------- */
+
+int wf_start(uint16_t op, uint32_t arg, const uint32_t extra[4], struct wf_buffer buf[4],
+             uint32_t *result, uint32_t *aux, uint32_t id, wf_done_fn done)
+{
+    static const uint32_t none[4];
+    struct fetch *f;
+    struct held *h, **p;
+    struct timespec until;
+    uint32_t wait;
+    int i, st = WF_OK;
+
+    if (!extra)
+        extra = none;
+    wait = wait_of(extra[0]);
+    if ((op != WF_HEAD && op != WF_READ) || !wait || !done || !timer_ready())
+        return wf_call(op, arg, extra, buf, result, aux);
+    *result = *aux = 0;
+    for (i = 0; i < 4; i++)
+        buf[i].written = 0;
+    if (op == WF_READ && (!buf[0].out || !buf[0].length))
+        return WF_BADREQUEST;
+    if (!(f = lookup(arg)))
+        return WF_BADREQUEST;
+    pthread_mutex_lock(&f->mtx);
+    if (op == WF_HEAD ? head_ready_locked(f) : read_ready_locked(f)) {
+        if (op == WF_HEAD)
+            st = head_answer_locked(f, buf[0].out, buf[0].length, result, aux, &buf[0].written);
+        else
+            read_answer_locked(f, buf[0].out, buf[0].length, result, aux, &buf[0].written);
+        pthread_mutex_unlock(&f->mtx);
+        release(f);
+        return st;
+    }
+    if (!(h = calloc(1, sizeof *h))) {
+        pthread_mutex_unlock(&f->mtx);
+        release(f);
+        return wf_call(op, arg, extra, buf, result, aux);   /* no memory to hold it: it waits here, as before */
+    }
+    h->id = id;
+    h->op = op;
+    h->out = buf[0].out;
+    h->room = buf[0].length;
+    h->until = until = deadline_ms(wait);
+    h->done = done;
+    for (p = &f->held; *p; p = &(*p)->next)
+        ;
+    *p = h;                                     /* answered in order, after any held before it */
+    pthread_mutex_unlock(&f->mtx);
+    release(f);
+    timer_poke_at(&until);
+    return WF_LATER;
+}
+
+void wf_cancel(uint32_t id)
+{
+    struct fetch *fs[MAX_FETCHES];
+    int i, n = gather(fs), found = 0;
+    for (i = 0; i < n; i++) {
+        if (!found) {
+            struct held **p;
+            pthread_mutex_lock(&fs[i]->mtx);
+            for (p = &fs[i]->held; *p; p = &(*p)->next)
+                if ((*p)->id == id) {
+                    struct held *h = *p;
+                    *p = h->next;
+                    h->done(id, WF_CALL_CANCELLED, 0, 0);
+                    free(h);
+                    found = 1;
+                    break;
+                }
+            pthread_mutex_unlock(&fs[i]->mtx);
+        }
+        release(fs[i]);
+    }
 }

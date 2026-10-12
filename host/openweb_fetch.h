@@ -66,4 +66,21 @@ struct wf_buffer {
 int wf_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct wf_buffer buf[4],
             uint32_t *result, uint32_t *aux);
 
+/* Answering later, for the services card (AmigaChrome's services.c): wf_start
+ * is wf_call with the card's id for the request and its completion. It
+ * answers now (returns the status, sets *result and *aux), or returns
+ * WF_LATER: a HEAD or READ with a wait and nothing to give yet is held, and
+ * done(id, status, result, aux) is called once, from one of this library's
+ * threads, when the head or body bytes come, the fetch ends or is
+ * cancelled, or the wait runs out. Until then buf[0].out is the library's to
+ * write; nothing else of buf[] is kept. wf_cancel(id): the card no longer
+ * wants request id; if it is held, done is called at once with
+ * WF_CALL_CANCELLED. Other ops, and waits of 0, run as wf_call does. */
+#define WF_LATER           1
+#define WF_CALL_CANCELLED (-3)
+typedef void (*wf_done_fn)(uint32_t id, int32_t status, uint32_t result, uint32_t aux);
+int wf_start(uint16_t op, uint32_t arg, const uint32_t extra[4], struct wf_buffer buf[4],
+             uint32_t *result, uint32_t *aux, uint32_t id, wf_done_fn done);
+void wf_cancel(uint32_t id);
+
 #endif
