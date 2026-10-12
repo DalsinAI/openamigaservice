@@ -7,7 +7,8 @@ its Amiga side, the `Nursery` command that lists what is there, and the
 Cradle-side services.
 
 `openservice.device` hands work from an Amiga to a named service, such as
-`opentls.key/1` for TLS key maths, and `media.decode/1` for datatypes.
+`opentls.key/1` for TLS key maths, `media.decode/1` for datatypes, and
+`openweb.fetch/1` for HTTP and HTTPS.
 Programs ask by name and do not know where the work runs:
 
 - **On a board in this machine.** Every Dalsin AutoConfig board with the
@@ -32,6 +33,9 @@ Programs ask by name and do not know where the work runs:
 | `host/doc_render.c` | `doc.render/1` on the host: office documents as pages and text, laid out by LibreOffice or Apache OpenOffice (docs/DOC_RENDER.md); `host/office_pdf.py` drives OpenOffice |
 | `host/cdxl.c`, `host/media_cdxl.py` | `media.cdxl/1`: any movie into CDXL for an ECS, AGA or RTG Amiga, as an option (docs/MEDIA_CDXL.md); `media_cdxl.py` does it from the Cradle's command line |
 | `src/tocdxl.c` | `ToCDXL`, the Amiga command for `media.cdxl/1` |
+| `src/webfetch.c`, `include/openweb/webfetch.h` | The Amiga's side of `openweb.fetch/1`, for any program to link (docs/OPENWEB_FETCH.md) |
+| `src/owfetch.c` | `OWFetch`: fetches a URL through `openweb.fetch/1`, prints the status and headers, writes the body |
+| `host/openweb_fetch.c` | `openweb.fetch/1` on the host: HTTP and HTTPS fetches with OpenSSL 3, zlib and Brotli, many at once, each with its own handle (docs/OPENWEB_FETCH.md) |
 | `host/hostrun.c` | Running host tools (LibreOffice, poppler, ImageMagick, LibRaw, FluidSynth, sidplayfp) and the services' result cache |
 | `host/media_decode.c`, `host/media_av.c`, `host/media_tool.c`, `host/media_svg.c` | `media.decode/1` on the host: pictures (AVIF, HEIC, JPEG XL, camera RAW, PSD, SVG drawn at any size and anything FFmpeg or ImageMagick reads), sounds, MIDI, SID and video, for openamigaimage's datatypes (docs/MEDIA_DECODE.md) |
 | `opentls/` | An OpenSSL 3 provider for AmiSSL that sends a TLS handshake's key maths to `opentls.key/1`, and does it on the 68k when nothing answers |
@@ -62,10 +66,13 @@ call goes to the least busy one, so a cluster of Cradles shares the work.
 
 ## Building
 
-`./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`). Install
-`openservice.device` in `DEVS:`.
+`./build.sh`, with the os32-gcc16 compiler (`OS32_GCC16`), and `OWFetch`
+with the os32 stove's GCC 6.5 (`OS32`). Install `openservice.device` in
+`DEVS:`.
 
-The host side needs, on the Cradle: OpenSSL 3 for `opentls.key/1`, and
+The host side needs, on the Cradle: OpenSSL 3 for `opentls.key/1`, OpenSSL
+3's TLS and zlib for `openweb.fetch/1`, with libbrotlidec for its Brotli
+(on Ubuntu: `libssl-dev zlib1g-dev libbrotli-dev`), and
 libavif and libheif with libheif's HEVC decoder plugin for `media.decode/1`
 and FFmpeg's libraries for its sounds (on Ubuntu: `libavif-dev libheif-dev
 libheif-plugin-libde265 libavformat-dev libavcodec-dev libswresample-dev`).
@@ -79,7 +86,8 @@ SID tunes, and `librsvg2-2` (on most desktops already) for SVG; a missing tool j
 what is installed, and poppler's tools (`poppler-utils`), with `ghostscript` for
 PostScript and `pandoc` for EPUB and Markdown. `host/test_*.py` check
 each service with files made by `avifenc`, `heif-enc`, `ffmpeg` and
-LibreOffice.
+LibreOffice; `host/test_openweb_fetch.py` against HTTP and HTTPS servers it
+starts on 127.0.0.1, with a throwaway certificate it makes with `openssl`.
 
 Measured on AmigaOS 3.2.3 (AmigaChrome, OpenSocket) against a Cradle on
 other x86 cores: 500 `echo/1` calls, all correct, 2.2 ms each.
