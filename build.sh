@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds openservice.device, Nursery, ServiceTest and ToCDXL for AmigaOS 3.x with the
-# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's libraries: TLS keys, media decoding and documents.
+# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's libraries: TLS keys,
+# media decoding, documents and web fetches.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmigaChrome/stoves/os32-gcc16)
 # MIT, Copyright (c) 2026 Dalsin Limited.
 set -e
@@ -35,4 +36,8 @@ if pkg-config --exists libavif libheif 2>/dev/null; then
 fi
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.
 gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread -ldl
+# openweb.fetch/1: OpenSSL 3's TLS and zlib.
+if [ -f /usr/include/openssl/ssl.h ] && [ -f /usr/include/zlib.h ]; then
+    gcc -O2 -Wall -fPIC -shared -o host/libopenwebfetch.so host/openweb_fetch.c -lssl -lcrypto -lz -lpthread
+fi
 ls -l bin
