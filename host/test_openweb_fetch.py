@@ -2,6 +2,7 @@
 HTTPS with a certificate it makes in a temporary directory (and throws away),
 errors, cancels, many fetches at once; then https://example.com when the
 network allows. MIT, Copyright (c) 2026 Dalsin Limited."""
+import ctypes
 import gzip
 import hashlib
 import http.server
@@ -25,6 +26,22 @@ E_DNS, E_CONNECT, E_TLS, E_TIMEOUT, E_PROTOCOL, E_CANCELLED, E_CLOSED, E_DECODE 
 
 BIG = random.Random(1200).randbytes(6 << 20)
 TEXT = b"".join(b"Line %d of a page the Amiga asked for.\n" % i for i in range(4000))
+
+
+def brotli_compress(data):
+    """Brotli through the system's libbrotlienc, or None when it is not there."""
+    try:
+        enc = ctypes.CDLL("libbrotlienc.so.1")
+    except OSError:
+        return None
+    size = ctypes.c_size_t(len(data) + 1024)
+    out = ctypes.create_string_buffer(size.value)
+    ok = enc.BrotliEncoderCompress(ctypes.c_int(9), ctypes.c_int(22), ctypes.c_int(0), ctypes.c_size_t(len(data)),
+                                   data, ctypes.byref(size), out)
+    return out.raw[:size.value] if ok else None
+
+
+BR = brotli_compress(TEXT)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -65,6 +82,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.reply(200, gzip.compress(TEXT), [("Content-Encoding", "gzip")])
             else:
                 self.reply(200, TEXT)
+        elif p == "/br":
+            if BR and "br" in accept:
+                self.reply(200, BR, [("Content-Encoding", "br")])
+            else:
+                self.reply(200, TEXT)
+        elif p == "/badbr":
+            self.reply(200, b"\xff\xff\xff not brotli at all", [("Content-Encoding", "br")])
         elif p == "/deflate":
             c = zlib.compressobj(wbits=-15)                       # raw, as some servers send it
             self.reply(200, c.compress(TEXT) + c.flush(), [("Content-Encoding", "deflate")])
@@ -256,6 +280,17 @@ assert body == TEXT and hd["flags"] & H_LENGTH and hd["length"] == len(TEXT) and
 close(h)
 print(f"gzip and raw deflate undone with DECODE ({len(gzip.compress(TEXT))} -> {len(TEXT)} bytes), "
       "Content-Encoding dropped, the length fixed once the body is in; left alone without DECODE")
+asked = fetch(base + "/headers", flags=DECODE)[1].decode()
+if "Accept-Encoding: gzip, deflate, br\n" in asked and BR:
+    hd, body, _ = fetch(base + "/br", flags=DECODE)
+    assert body == TEXT and hd["flags"] & H_DECODED and "Content-Encoding" not in hd["text"], hd
+    hd, body, _ = fetch(base + "/br", headers="Accept-Encoding: br\n")
+    assert body == BR and "Content-Encoding: br\n" in hd["text"], hd
+    hd, body, err = fetch(base + "/badbr", flags=DECODE)
+    assert hd["status"] == 200 and err == E_DECODE, (hd, err)
+    print(f"Brotli undone with DECODE ({len(BR)} -> {len(TEXT)} bytes), left alone without; bad Brotli is error 8")
+else:
+    print("Brotli: skipped (" + ("the library was built without libbrotlidec" if BR else "no libbrotlienc to make a body") + ")")
 
 # ---- uploads -------------------------------------------------------------------------------
 up = BIG[:3 << 20]

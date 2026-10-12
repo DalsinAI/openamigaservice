@@ -40,6 +40,12 @@
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <zlib.h>
+#ifdef WF_BROTLI
+#include <brotli/decode.h>
+#define ACCEPT_ENCODING "gzip, deflate, br"
+#else
+#define ACCEPT_ENCODING "gzip, deflate"
+#endif
 
 #define MAX_FETCHES  64
 #define MAX_TEXT     (64u << 10)   /* the request text; a response head */
@@ -413,7 +419,7 @@ static void conn_fail(struct fetch *f, struct conn *c, uint32_t otherwise, const
 {
     char why[160];
     if (c->timedout) {
-        snprintf(why, sizeof why, "no answer for %u s %s", f->timeout, what);
+        snprintf(why, sizeof why, "timed out after %u s %s", f->timeout, what);
         fail(f, WF_E_TIMEOUT, why);
     } else {
         unsigned long e = c->ssl ? ERR_peek_last_error() : 0;
@@ -689,6 +695,7 @@ static int send_request(struct fetch *f, struct conn *c)
 /* ---- the answer ---------------------------------------------------------------------- */
 
 enum { BODY_NONE, BODY_LENGTH, BODY_CHUNKED, BODY_CLOSE };
+enum { DECODE_NONE, DECODE_ZLIB, DECODE_BROTLI };
 
 static const char *value_of(const char *line, const char *name)
 {
@@ -822,8 +829,15 @@ static int read_head(struct fetch *f, struct conn *c, int broke, int *mode, uint
     else
         *mode = BODY_CLOSE;
     *length = clen;
-    *decode = *mode != BODY_NONE && (f->flags & WF_DECODE)
-              && (!strcmp(coding, "gzip") || !strcmp(coding, "x-gzip") || !strcmp(coding, "deflate"));
+    *decode = 0;
+    if (*mode != BODY_NONE && (f->flags & WF_DECODE)) {
+        if (!strcmp(coding, "gzip") || !strcmp(coding, "x-gzip") || !strcmp(coding, "deflate"))
+            *decode = DECODE_ZLIB;
+#ifdef WF_BROTLI
+        else if (!strcmp(coding, "br"))
+            *decode = DECODE_BROTLI;
+#endif
+    }
 
     /* The Amiga's copy: no Transfer-Encoding (the body comes de-chunked),
      * and when decoded, no Content-Encoding or Content-Length either. */
@@ -910,11 +924,14 @@ static int push(struct fetch *f, const uint8_t *d, uint32_t n)
     return 0;
 }
 
-/* Where body bytes go: the window, through inflate when decoding. */
+/* Where body bytes go: the window, through inflate (or Brotli) when decoding. */
 struct sink {
     struct fetch *f;
     int decode, started, ended, raw;
     z_stream z;
+#ifdef WF_BROTLI
+    BrotliDecoderState *br;
+#endif
     uint8_t out[IOBUF];
 };
 
@@ -923,6 +940,30 @@ static int sink_put(struct sink *s, const uint8_t *d, uint32_t n)
 {
     if (!s->decode)
         return push(s->f, d, n);
+#ifdef WF_BROTLI
+    if (s->decode == DECODE_BROTLI) {
+        size_t in_left = n;
+        const uint8_t *next_in = d;
+        if (!s->started && !(s->br = BrotliDecoderCreateInstance(NULL, NULL, NULL)))
+            return -2;
+        s->started = 1;
+        while (!s->ended) {
+            size_t out_left = sizeof s->out;
+            uint8_t *next_out = s->out;
+            BrotliDecoderResult r = BrotliDecoderDecompressStream(s->br, &in_left, &next_in, &out_left, &next_out, NULL);
+            uint32_t got = (uint32_t)(sizeof s->out - out_left);
+            if (got && push(s->f, s->out, got))
+                return -1;
+            if (r == BROTLI_DECODER_RESULT_ERROR)
+                return -2;
+            if (r == BROTLI_DECODER_RESULT_SUCCESS)
+                s->ended = 1;                   /* anything after the end is dropped */
+            else if (r == BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT)
+                break;
+        }
+        return 0;
+    }
+#endif
     if (!s->started) {
         /* gzip and zlib by their headers; "deflate" without zlib's header is raw. */
         int bits = 15 + 32;
@@ -961,6 +1002,12 @@ static int sink_put(struct sink *s, const uint8_t *d, uint32_t n)
 
 static void sink_end(struct sink *s)
 {
+#ifdef WF_BROTLI
+    if (s->br) {
+        BrotliDecoderDestroyInstance(s->br);
+        return;
+    }
+#endif
     if (s->started)
         inflateEnd(&s->z);
 }
@@ -1315,7 +1362,7 @@ static int parse_request(struct fetch *f, const uint8_t *text, uint32_t n)
         char tail[200];
         int k = snprintf(tail, sizeof tail, "%s%s%s",
                          ua ? "" : "User-Agent: OpenWeb-Fetch/1\r\n",
-                         decode ? "Accept-Encoding: gzip, deflate\r\n" : "",
+                         decode ? "Accept-Encoding: " ACCEPT_ENCODING "\r\n" : "",
                          "Connection: close\r\n");
         if (f->flags & WF_BODY) {
             if (f->body_length == WF_LENGTH_UNKNOWN)

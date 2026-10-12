@@ -36,8 +36,12 @@ if pkg-config --exists libavif libheif 2>/dev/null; then
 fi
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.
 gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread -ldl
-# openweb.fetch/1: OpenSSL 3's TLS and zlib.
+# openweb.fetch/1: OpenSSL 3's TLS and zlib; Brotli too when its decoder's headers are there.
 if [ -f /usr/include/openssl/ssl.h ] && [ -f /usr/include/zlib.h ]; then
-    gcc -O2 -Wall -fPIC -shared -o host/libopenwebfetch.so host/openweb_fetch.c -lssl -lcrypto -lz -lpthread
+    if [ -f /usr/include/brotli/decode.h ]; then
+        gcc -O2 -Wall -DWF_BROTLI -fPIC -shared -o host/libopenwebfetch.so host/openweb_fetch.c -lssl -lcrypto -lz -lbrotlidec -lpthread
+    else
+        gcc -O2 -Wall -fPIC -shared -o host/libopenwebfetch.so host/openweb_fetch.c -lssl -lcrypto -lz -lpthread
+    fi
 fi
 ls -l bin

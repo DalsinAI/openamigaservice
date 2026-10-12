@@ -1,6 +1,6 @@
 /*
  * openweb.fetch/1: HTTP and HTTPS fetches for an Amiga, done here with
- * OpenSSL 3 and zlib (docs/OPENWEB_FETCH.md). Each fetch is a handle with
+ * OpenSSL 3, zlib and Brotli (docs/OPENWEB_FETCH.md). Each fetch is a handle with
  * a thread of its own; the calls only start, ask, read and stop it, so
  * many run at once. The emulator's service host calls this.
  * MIT, Copyright (c) 2026 Dalsin Limited.
