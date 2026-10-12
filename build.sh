@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds openservice.device, Nursery, ServiceTest and ToCDXL for AmigaOS 3.x with the
-# os32-gcc16 compiler (GCC 16.2, libnix), and the host side's libraries: TLS keys,
-# media decoding, documents and web fetches.
+# os32-gcc16 compiler (GCC 16.2, libnix), OWFetch with the os32 stove (GCC 6.5),
+# and the host side's libraries: TLS keys, media decoding, documents and web fetches.
 #   OS32_GCC16  compiler root holding prefix/ (default ~/AmigaChrome/stoves/os32-gcc16)
 # MIT, Copyright (c) 2026 Dalsin Limited.
 set -e
@@ -19,6 +19,11 @@ done
 "$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/Nursery src/nursery.c src/mdns.c src/paired.c src/oscrypto.c src/osrandom.c -lamiga
 "$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ServiceTest src/servicetest.c -lamiga
 "$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ToCDXL src/tocdxl.c -lamiga
+# OWFetch and its client (src/webfetch.c, for other programs to link), with
+# the os32 stove's GCC 6.5 and libnix.
+#   OS32  the stove holding prefix/ (default ~/AmigaChrome/stoves/os32)
+CC65=${OS32:-"$HOME/AmigaChrome/stoves/os32"}/prefix/bin/m68k-amigaos-gcc
+"$CC65" -m68020 -noixemul -Os -fno-delete-null-pointer-checks -Wall -Werror -Iinclude -o bin/OWFetch src/owfetch.c src/webfetch.c
 # The host side (Linux, OpenSSL 3), for the LAN Cradle and the emulator.
 if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
