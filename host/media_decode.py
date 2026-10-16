@@ -1,6 +1,6 @@
 """ctypes binding for libmediadecode.so (media_decode.h, and cdxl.h's
 media.cdxl/1 when it is built in), for the LAN Cradle.
-MIT, Copyright (c) 2026 Dalsin Limited."""
+MIT, Copyright (c) 2026 AmigaChrome Team."""
 import ctypes
 import os
 

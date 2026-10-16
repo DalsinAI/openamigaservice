@@ -1,6 +1,6 @@
 /*
  * openservice: the Cradles in the nursery (mdns.c).
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #ifndef OPENSERVICE_MDNS_H
 #define OPENSERVICE_MDNS_H

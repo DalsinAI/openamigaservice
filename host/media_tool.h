@@ -2,7 +2,7 @@
  * media.decode/1, the half that runs host tools (media_tool.c): camera RAW
  * through LibRaw's dcraw_emu, anything else ImageMagick reads (XCF, TGA,
  * EPS, ...), MIDI through FluidSynth and SID tunes through sidplayfp.
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #ifndef MEDIA_TOOL_H
 #define MEDIA_TOOL_H

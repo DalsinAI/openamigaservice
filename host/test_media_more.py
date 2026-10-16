@@ -1,6 +1,6 @@
 """Checks media_decode.c's icons, font sheets and animated PNG and GIF.
 Needs ImageMagick (icons are made with it; fonts are drawn by it) and ffmpeg.
-MIT, Copyright (c) 2026 Dalsin Limited."""
+MIT, Copyright (c) 2026 AmigaChrome Team."""
 import glob
 import os
 import struct

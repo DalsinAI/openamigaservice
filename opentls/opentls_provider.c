@@ -13,7 +13,7 @@
  * build is base-relative, and those pointers lead into the library without
  * its data register. Everything it needs it calls through the library.
  *
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #include <string.h>
 #include <stdlib.h>
