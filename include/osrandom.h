@@ -1,6 +1,6 @@
 /*
  * Random bytes on an Amiga (osrandom.c).
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #ifndef OSRANDOM_H
 #define OSRANDOM_H

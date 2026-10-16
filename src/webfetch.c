@@ -1,7 +1,7 @@
 /*
  * webfetch: openweb.fetch/1 through openservice.device (include/openweb/webfetch.h).
  * No C library beyond memcpy, memset and strlen, so any program can link it.
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #include <string.h>
 #include <exec/types.h>

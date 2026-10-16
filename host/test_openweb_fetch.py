@@ -1,7 +1,7 @@
 """Checks openweb_fetch.c against servers this test starts on 127.0.0.1: HTTP,
 HTTPS with a certificate it makes in a temporary directory (and throws away),
 errors, cancels, many fetches at once; then https://example.com when the
-network allows. MIT, Copyright (c) 2026 Dalsin Limited."""
+network allows. MIT, Copyright (c) 2026 AmigaChrome Team."""
 import ctypes
 import gzip
 import hashlib

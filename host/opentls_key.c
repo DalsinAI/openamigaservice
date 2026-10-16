@@ -1,6 +1,6 @@
 /*
  * opentls.key/1 on the host, with OpenSSL 3 (opentls_key.h).
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #include <string.h>
 #include <openssl/evp.h>

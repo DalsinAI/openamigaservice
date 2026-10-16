@@ -2,7 +2,7 @@
 six-digit code both sides show, and sessions sealed with ChaCha20-Poly1305
 under the key pairing agreed.
 
-MIT, Copyright (c) 2026 Dalsin Limited.
+MIT, Copyright (c) 2026 AmigaChrome Team.
 """
 import hashlib
 import json

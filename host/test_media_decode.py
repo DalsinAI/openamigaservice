@@ -1,5 +1,5 @@
 """Checks media_decode.c against files made by avifenc and heif-enc.
-MIT, Copyright (c) 2026 Dalsin Limited."""
+MIT, Copyright (c) 2026 AmigaChrome Team."""
 import os
 import struct
 import subprocess

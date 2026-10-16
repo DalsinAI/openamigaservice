@@ -16,7 +16,7 @@
  * each want their own wf_service (or their own task). The waits are in
  * milliseconds, at most 2000: a call answers sooner when something happens.
  *
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #ifndef OPENWEB_WEBFETCH_H
 #define OPENWEB_WEBFETCH_H

@@ -1,5 +1,5 @@
 """ctypes binding for libdocrender.so (doc_render.h), for the LAN Cradle.
-MIT, Copyright (c) 2026 Dalsin Limited."""
+MIT, Copyright (c) 2026 AmigaChrome Team."""
 import ctypes
 import os
 

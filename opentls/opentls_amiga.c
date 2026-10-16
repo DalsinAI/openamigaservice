@@ -2,7 +2,7 @@
  * opentls on the Amiga: the transport is openservice.device's opentls.key/1
  * (opentls_amiga.h). Each request is one DoIO from the calling task, so
  * curl's threads can all use it at once.
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #include <string.h>
 #include <exec/types.h>

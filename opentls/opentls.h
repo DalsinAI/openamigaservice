@@ -4,7 +4,7 @@
  * every TLS handshake (certificate and handshake signatures, the key
  * exchange) goes to the transport, normally openservice.device's
  * opentls.key/1, and is done here when the transport cannot.
- * MIT, Copyright (c) 2026 Dalsin Limited.
+ * MIT, Copyright (c) 2026 AmigaChrome Team.
  */
 #ifndef OPENTLS_H
 #define OPENTLS_H
