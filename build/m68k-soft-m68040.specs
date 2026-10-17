@@ -1,0 +1,5 @@
+# The 68040 soft-float link: -m68040 alone links libnix's soft libm020
+# (its maths through the mathieee libraries), not libm881; only -m68881 or
+# -mhard-float (or a 68060) adds libm881. Passed with -specs=.
+*link_cpu:
+%{m6802*|mc6802*|m6803*|m6804*|m6806*|m6808*|mcpu=6802*|mcpu=6803*|mcpu=6804*|mcpu=6806*|mcpu=6808*:-fl libm020} %{mhard-float|m68881|mcpu=6806*|mcpu=6808*:-fl libm881}
