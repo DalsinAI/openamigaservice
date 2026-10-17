@@ -9,21 +9,25 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 P=${OS32_GCC16:-"$HOME/AmigaChrome/stoves/os32-gcc16"}/prefix
 CC="$P/bin/m68k-amigaos-gcc"
 mkdir -p "$HERE/bin" "$HERE/obj"
+# The 68040, soft float (one binary for full and LC/EC 68040s): the specs
+# file links libnix's soft libm (maths through the mathieee libraries),
+# not its FPU libm881.
+SOFT="-m68040 -specs=$HERE/build/m68k-soft-m68040.specs"
 cd "$HERE"
 # The device: its own ROMTag, no C library start-up; start.c is linked first.
 for f in start device mdns paired oscrypto osrandom; do
-    "$CC" -m68020 -Os -fno-delete-null-pointer-checks -Wall -fomit-frame-pointer -Iinclude -c src/$f.c -o obj/$f.o
+    "$CC" $SOFT -Os -fno-delete-null-pointer-checks -Wall -fomit-frame-pointer -Iinclude -c src/$f.c -o obj/$f.o
 done
-"$CC" -nostartfiles -m68020 -o bin/openservice.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
+"$CC" -nostartfiles $SOFT -o bin/openservice.device obj/start.o obj/device.o obj/mdns.o obj/paired.o obj/oscrypto.o obj/osrandom.o \
     -lamiga -Wl,-Map=obj/openservice.device.map
-"$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/Nursery src/nursery.c src/mdns.c src/paired.c src/oscrypto.c src/osrandom.c -lamiga
-"$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ServiceTest src/servicetest.c -lamiga
-"$CC" -m68020 -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ToCDXL src/tocdxl.c -lamiga
+"$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/Nursery src/nursery.c src/mdns.c src/paired.c src/oscrypto.c src/osrandom.c -lamiga
+"$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ServiceTest src/servicetest.c -lamiga
+"$CC" $SOFT -mcrt=nix20 -Os -fno-delete-null-pointer-checks -Wall -Iinclude -o bin/ToCDXL src/tocdxl.c -lamiga
 # OWFetch and its client (src/webfetch.c, for other programs to link), with
 # the os32 stove's GCC 6.5 and libnix.
 #   OS32  the stove holding prefix/ (default ~/AmigaChrome/stoves/os32)
 CC65=${OS32:-"$HOME/AmigaChrome/stoves/os32"}/prefix/bin/m68k-amigaos-gcc
-"$CC65" -m68020 -noixemul -Os -fno-delete-null-pointer-checks -Wall -Werror -Iinclude -o bin/OWFetch src/owfetch.c src/webfetch.c
+"$CC65" $SOFT -noixemul -Os -fno-delete-null-pointer-checks -Wall -Werror -Iinclude -o bin/OWFetch src/owfetch.c src/webfetch.c
 # The host side (Linux, OpenSSL 3), for the LAN Cradle and the emulator.
 if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
