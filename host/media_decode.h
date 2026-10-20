@@ -12,8 +12,15 @@
 #define MD_PROBE  1   /* buf0 file, extra[0..1] largest size -> buf1 info (24 bytes); result width, aux height */
 #define MD_DECODE 2   /* arg frame, buf0 file, extra[0..1] largest size -> buf1 ARGB; result width, aux height */
 #define MD_VOPEN  3   /* buf0 file, extra[0..1] largest size -> buf1 info; result handle, aux fps x 1000 */
-#define MD_VFRAME 4   /* arg handle, extra[0] frame, extra[1] 0 chunky / 1 RGB -> buf1; result the frame */
+#define MD_VFRAME 4   /* arg handle, extra[0] frame, extra[1] 0 chunky / 1 RGB / 2 HAM8, extra[2] bit 0 fixed base
+                         colours (HAM8) -> buf1; result the frame */
 #define MD_VCLOSE 5   /* arg handle */
+#define MD_VOPENURL 6 /* buf0 an http:// or https:// URL, extra[0..1] largest size -> buf1 info; result handle,
+                         aux fps x 1000. Read forward only (MD_FLAG_LIVE) */
+#define MD_VSOUND 7   /* arg handle, extra[0] frame, extra[1] rate -> buf1 that frame's sound, 8-bit signed mono;
+                         result the samples, aux the rate */
+#define MD_VUPLOAD 8  /* arg upload (0: a new one), buf0 its next part, extra[0] bit 0 the last part -> result
+                         the upload, aux its bytes so far. VOPEN with an empty buf0 and extra[2] the upload opens it */
 
 #define MD_KIND_PICTURE 1
 #define MD_KIND_ANIMATION 2
@@ -71,6 +78,10 @@
 #define MD_FLAG_ALPHA 1
 #define MD_FLAG_SOUND 2   /* a video with a sound track */
 #define MD_FLAG_LOOP  4   /* an animation (GIF, APNG) that asks to play over and over */
+#define MD_FLAG_LIVE  8   /* a stream from a URL: frames by the clock, never back; frames 0 when it never ends */
+
+/* VFRAME extra[2] for HAM8: the fixed 4x4x4 cube as base colours, not the picture's own. */
+#define MD_HAM8_FIXED 1
 
 #define MD_INFO_SIZE 24
 

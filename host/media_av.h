@@ -25,10 +25,18 @@ int md_sound_decode(const struct md_buffer *file, uint32_t first, const uint32_t
 
 /* Video: VOPEN keeps the file and answers info, result the handle, aux
  * frames a second x 1000; VFRAME (extra[0] the frame, extra[1] 0 for 8-bit
- * dithered, 1 for 24-bit RGB) gives one; VCLOSE lets it go. */
+ * dithered, 1 for 24-bit RGB, 2 for HAM8) gives one; VCLOSE lets it go. */
 int md_video_open(const struct md_buffer *file, const uint32_t extra[4], uint8_t info[MD_INFO_SIZE],
                   uint32_t *result, uint32_t *aux);
 int md_video_frame(uint32_t handle, const uint32_t extra[4], struct md_buffer *out, uint32_t *result, uint32_t *aux);
 int md_video_close(uint32_t handle);
+/* VOPENURL: a stream from the network, read forward only. */
+int md_video_open_url(const struct md_buffer *url, const uint32_t extra[4], uint8_t info[MD_INFO_SIZE],
+                      uint32_t *result, uint32_t *aux);
+/* VSOUND: frame extra[0]'s sound, 8-bit signed mono at extra[1] Hz. */
+int md_video_sound(uint32_t handle, const uint32_t extra[4], struct md_buffer *out, uint32_t *result, uint32_t *aux);
+/* VUPLOAD: a file in parts, for VOPEN. */
+int md_video_upload(uint32_t handle, const struct md_buffer *part, const uint32_t extra[4], uint32_t *result,
+                    uint32_t *aux);
 
 #endif
