@@ -324,15 +324,25 @@ int md_call(uint16_t op, uint32_t arg, const uint32_t extra[4], struct md_buffer
     if ((op == MD_PROBE || op == MD_DECODE) && md_svg_is(buf[0].in, buf[0].length, hint))
         return md_svg_call(op, extra, buf, result, aux);
 #ifdef MD_AV
-    if (op == MD_VOPEN) {
-        if (!buf[0].in || !buf[0].length || md_is_av(buf[0].in, buf[0].length) == MD_AV_NONE)
+    if (op == MD_VOPEN || op == MD_VOPENURL) {
+        if (op == MD_VOPEN && buf[0].length && md_is_av(buf[0].in, buf[0].length) == MD_AV_NONE)
+            return MD_BADREQUEST;
+        if (op == MD_VOPEN && !buf[0].length && !extra[2])
+            return MD_BADREQUEST;
+        if (op == MD_VOPENURL && (!buf[0].in || !buf[0].length))
             return MD_BADREQUEST;
         if (!buf[1].out || buf[1].length < MD_INFO_SIZE)
             return MD_TOOSMALL;
-        if ((st = md_video_open(&buf[0], extra, buf[1].out, result, aux)) == MD_OK)
+        st = op == MD_VOPEN ? md_video_open(&buf[0], extra, buf[1].out, result, aux)
+                            : md_video_open_url(&buf[0], extra, buf[1].out, result, aux);
+        if (st == MD_OK)
             buf[1].written = MD_INFO_SIZE;
         return st;
     }
+    if (op == MD_VSOUND)
+        return md_video_sound(arg, extra, &buf[1], result, aux);
+    if (op == MD_VUPLOAD)
+        return md_video_upload(arg, &buf[0], extra, result, aux);
     if (op == MD_VFRAME)
         return md_video_frame(arg, extra, &buf[1], result, aux);
     if (op == MD_VCLOSE)

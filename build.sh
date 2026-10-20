@@ -37,7 +37,7 @@ fi
 # there; RAW, ImageMagick, MIDI and SID through those tools at run time.
 if pkg-config --exists libavif libheif 2>/dev/null; then
     if pkg-config --exists libavformat libavcodec libswresample libswscale libavutil 2>/dev/null; then
-        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c host/media_tool.c host/media_svg.c host/cdxl.c host/hostrun.c -lpthread -lz -ldl -lm \
+        gcc -O2 -Wall -DMD_AV -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_av.c host/media_tool.c host/media_svg.c host/cdxl.c host/ham8.c host/hostrun.c -lpthread -lz -ldl -lm \
             $(pkg-config --cflags --libs libavif libheif libavformat libavcodec libswresample libswscale libavutil)
     else
         gcc -O2 -Wall -fPIC -shared -o host/libmediadecode.so host/media_decode.c host/media_tool.c host/media_svg.c host/hostrun.c -lpthread -lz -ldl -lm $(pkg-config --cflags --libs libavif libheif)
