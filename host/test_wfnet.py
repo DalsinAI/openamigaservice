@@ -671,8 +671,9 @@ class H2Conn:
         else:
             data = b"hello over h2\n"
         status = "404" if path == "/missing" else "200"
+        cl = len(data) + (5 if path == "/short" else -5 if path == "/long" else 0)
         fields = [(":status", status), ("server", "pyh2"), ("content-type", "text/plain"),
-                  ("content-length", str(len(data))), ("x-stream", str(sid)), ("set-cookie", "s=1"), ("set-cookie", "t=2")]
+                  ("content-length", str(cl)), ("x-stream", str(sid)), ("set-cookie", "s=1"), ("set-cookie", "t=2")]
         with self.lock:
             block = self.enc.encode(fields)          # encoded in the order sent, so the tables agree
             self.s.sendall(struct.pack(">I", len(block))[1:] + bytes([1, 4 | (1 if method == "HEAD" else 0)])
@@ -945,7 +946,14 @@ def proxy_server(need_auth=None):
                 hdrs = {l.split(":", 1)[0].lower(): l.split(":", 1)[1].strip() for l in lines_[1:]}
                 with LOCK:
                     SEEN["proxy"].append((method, target, hdrs.get("proxy-authorization")))
-                if need_auth and hdrs.get("proxy-authorization") != need_auth:
+                if need_auth == "digest":
+                    pa = hdrs.get("proxy-authorization")
+                    if not (digest_ok(pa, method, "MD5") and f'uri="{target}"' in pa):
+                        c.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Digest '
+                                  b'realm="test@wfnet", qop="auth", nonce="' + DIGEST_NONCE.encode() + b'", opaque="op"\r\n'
+                                  b"Content-Length: 6\r\n\r\nlogin\n")
+                        continue
+                elif need_auth and hdrs.get("proxy-authorization") != need_auth:
                     c.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="proxy"\r\n'
                               b"Content-Length: 6\r\n\r\nlogin\n")
                     continue
@@ -980,6 +988,55 @@ def proxy_server(need_auth=None):
 
 PROXY = proxy_server()
 PROXY_AUTH = proxy_server("Basic " + base64.b64encode(b"pu:pp").decode())
+PROXY_DIGEST = proxy_server("digest")
+
+
+# ---- an HTTP/1.1 server that answers the first request on a connection and closes on the second, unanswered --
+
+
+def flaky_server():
+    ls = socket.socket()
+    ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    ls.bind(("127.0.0.1", 0))
+    ls.listen(8)
+
+    def conn(c):
+        try:
+            data = b""
+            for n in range(2):
+                while b"\r\n\r\n" not in data:
+                    g = c.recv(4096)
+                    if not g:
+                        return
+                    data += g
+                head, data = data.split(b"\r\n\r\n", 1)
+                length = 0
+                for l in head.decode().split("\r\n")[1:]:
+                    if l.lower().startswith("content-length:"):
+                        length = int(l.split(":", 1)[1])
+                while len(data) < length:
+                    data += c.recv(4096)
+                data = data[length:]
+                with LOCK:
+                    SEEN["flaky"].append(head.split(b" ")[0].decode())
+                if n == 0:
+                    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nok\n")
+        except OSError:
+            pass
+        finally:
+            c.close()
+
+    def accept():
+        while True:
+            c, _ = ls.accept()
+            threading.Thread(target=conn, args=(c,), daemon=True).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+    return ls.getsockname()[1]
+
+
+SEEN["flaky"] = []
+FLAKY = flaky_server()
 
 # ---- HTTP/1.1 ------------------------------------------------------------------------------------------
 
@@ -1013,6 +1070,20 @@ hd, body2, _ = F.fetch(f"{base}/whoami")
 assert body2 not in ports, "a connection the server closed was used again"
 assert F.stats()[1] == 1, F.stats()
 print("kept connections: 20 fetches on one connection (reused=yes); Connection: close honoured")
+
+# A kept connection that closes with no answer: GET and PUT go again; POST is not sent twice.
+for method, again in (("GET", True), ("PUT", True), ("POST", False)):
+    K = Fetcher()
+    SEEN["flaky"].clear()
+    hd, body, _ = K.fetch(f"http://127.0.0.1:{FLAKY}/first")
+    assert hd["status"] == 200 and body == b"ok\n", hd
+    hd, body, _ = K.fetch(f"http://127.0.0.1:{FLAKY}/second", method, body=b"x=1" if method != "GET" else None)
+    if again:
+        assert hd["status"] == 200 and body == b"ok\n" and SEEN["flaky"] == ["GET", method, method], (hd, SEEN["flaky"])
+    else:
+        assert hd["error"] == E_CLOSED and SEEN["flaky"] == ["GET", "POST"], (hd, SEEN["flaky"])
+    K.free()
+print("a kept connection closed with no answer: GET and PUT sent again, POST not")
 
 # Chunked, close-delimited, large bodies, several at once.
 hd, body, err = F.fetch(f"{base}/chunked")
@@ -1077,6 +1148,16 @@ F.close(h)
 assert F.call(HEAD, 12345, (0, 0, 0, 0), room=100)[0] == -2
 assert F.call(OPEN, 0, (0, 0, 0, 0), (b"GET ftp://x/\n",))[0] == -2
 print("errors: DNS, refused, a timeout of 1 s, CANCEL; bad handles and URLs refused (-2)")
+
+# A name with two addresses, the first refusing after the connect started: the second is tried.
+os.environ["WFNP_HOSTS"] = "two.test 127.0.0.2 127.0.0.1"
+hd, body, _ = F.fetch(f"http://two.test:{HTTP}/hello")
+assert hd["status"] == 200 and body == b"hello, Amiga\n", hd
+os.environ["WFNP_HOSTS"] = "none.test 127.0.0.2 127.0.0.3"
+hd, body, _ = F.fetch(f"http://none.test:{HTTP}/hello")
+assert hd["error"] == E_CONNECT, hd
+os.environ.pop("WFNP_HOSTS")
+print("connect: the next address when the first fails on the way; refused when none takes it")
 
 # Content-Encoding: kept as sent, or through the decoder hook (zlib standing in for the datatypes).
 hd, body, _ = F.fetch(f"{base}/gzip", flags=DECODE)
@@ -1202,6 +1283,17 @@ hd, body, err = F.fetch(f"{h2base}/reset")
 assert hd["error"] == E_CLOSED, hd
 hd, body, _ = F.fetch(f"{h2base}/hello")
 assert body == b"hello over h2\n"
+# content-length against the DATA: short at END_STREAM, or more DATA than it says.
+hd, body, err = F.fetch(f"{h2base}/short")
+assert hd["status"] == 200 and err == E_CLOSED, (hd, err)
+hd, body, err = F.fetch(f"{h2base}/long")
+assert err == E_PROTOCOL, (hd, err)
+hd, body, _ = F.fetch(f"{h2base}/hello")
+assert body == b"hello over h2\n"
+# Header names in lower case, however long.
+long_name = "X-" + "Long" * 20
+hd, body, _ = F.fetch(f"{h2base}/headers", headers=f"{long_name}: 1\n")
+assert f"{long_name.lower()}: 1" in body.decode(), body
 # Cancel a stream in flight: the connection stays.
 h = F.open(f"GET {h2base}/big\n")
 F.head(h)
@@ -1223,7 +1315,8 @@ G.free()
 # HTTP/1.1 only, by flag: the server falls back by ALPN.
 hd, body, _ = F.fetch(f"{h2base}/hello", flags=HTTP1)
 assert hd["version"] == 11 and body == b"hello, h1.1\n", hd
-print("HTTP/2: RST_STREAM fails one stream, CANCEL resets one, GOAWAY sends the untaken streams again on a new "
+print("HTTP/2: RST_STREAM fails one stream, content-length checked against the DATA, long header names lower-cased, "
+      "CANCEL resets one, GOAWAY sends the untaken streams again on a new "
       "connection; WF_HTTP1 offers http/1.1 alone")
 
 # ---- WebSocket -----------------------------------------------------------------------------------------
@@ -1336,8 +1429,15 @@ hd, body, _ = F.fetch(f"{sbase}/hello", headers=f":proxy http://pu:pp@127.0.0.1:
 assert hd["status"] == 200 and body == b"hello, Amiga\n" and "auth=proxy" in hd["info"], hd
 hd, body, _ = F.fetch(f"{base}/hello", headers=f":proxy http://pu:pp@127.0.0.1:{PROXY_AUTH}\n")
 assert hd["status"] == 200 and body == b"hello, Amiga\n", hd
+SEEN["proxy"].clear()
+hd, body, _ = F.fetch(f"{base}/hello", headers=f":proxy http://us%20er:pa%20ss@127.0.0.1:{PROXY_DIGEST}\n")
+assert hd["status"] == 200 and body == b"hello, Amiga\n" and "auth=proxy" in hd["info"], (hd, SEEN["proxy"])
+assert f'uri="{base}/hello"' in SEEN["proxy"][-1][2], SEEN["proxy"]
+hd, body, _ = F.fetch(f"{sbase}/hello", headers=f":proxy http://us%20er:pa%20ss@127.0.0.1:{PROXY_DIGEST}\n")
+assert hd["status"] == 200 and body == b"hello, Amiga\n", (hd, SEEN["proxy"])
+assert f'uri="localhost:{HTTPS}"' in SEEN["proxy"][-1][2], SEEN["proxy"]
 print("proxy from http_proxy and https_proxy, no_proxy by name, domain and *, WF_NOPROXY; 407 answered with Basic "
-      "for CONNECT and for absolute-form requests")
+      "for CONNECT and for absolute-form requests, and with Digest over the absolute URI or the authority")
 
 # ---- HTTP auth -----------------------------------------------------------------------------------------
 

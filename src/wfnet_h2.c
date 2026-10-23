@@ -200,14 +200,8 @@ static int conn_error(struct wfn *w, struct wfn_conn *c, wu32 code, const char *
 static unsigned long field(struct wfn_conn *c, unsigned char *out, unsigned long room, const char *name,
                            unsigned long nl, const char *value, unsigned long vl)
 {
-    char lname[64];
-    unsigned long i;
     (void)c;
-    if (nl >= sizeof lname)
-        return wfn_hpack_encode(NULL, name, nl, value, vl, 0, 1, out, room);
-    for (i = 0; i < nl; i++)
-        lname[i] = (char)(name[i] >= 'A' && name[i] <= 'Z' ? name[i] + 32 : name[i]);
-    return wfn_hpack_encode(NULL, lname, nl, value, vl, 0, 1, out, room);
+    return wfn_hpack_encode(NULL, name, nl, value, vl, 0, 1, out, room);
 }
 
 /* The request's HEADERS (and CONTINUATIONs): 0, or -1. */
@@ -217,7 +211,7 @@ static int send_headers(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
     unsigned long room = f->headers_len + strlen(f->target) + 2 * WFN_HOST_ROOM + 2048 + (f->auth ? strlen(f->auth) : 0);
     unsigned long n = 0, at, k;
     unsigned char *b = w->io.alloc(w->io.env, room);
-    const char *p = f->headers, *end = f->headers + f->headers_len;
+    char *p = f->headers, *end = f->headers + f->headers_len;
     char a[WFN_HOST_ROOM + 16], num[16];
     int end_stream, bad = 0, v6 = strchr(f->host, ':') != NULL;
     if (!b)
@@ -245,11 +239,13 @@ static int send_headers(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
     FIELD(":authority", 10, a, at);
     FIELD(":path", 5, f->target, strlen(f->target));
     while (p < end && !bad) {
-        const char *e = p, *colon, *v;
+        char *e = p, *colon;
+        const char *v;
         while (e < end && *e != '\r')
             e++;
         for (colon = p; colon < e && *colon != ':'; colon++)
-            ;
+            if (*colon >= 'A' && *colon <= 'Z')
+                *colon += 32;               /* HTTP/2 names are lower case */
         for (v = colon + 1; v < e && (*v == ' ' || *v == '\t'); v++)
             ;
         if (colon < e)
@@ -334,10 +330,20 @@ static int send_data(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
 
 /* ---- receiving ------------------------------------------------------------------ */
 
+/* Whether the body fell short of its Content-Length. */
+static int short_body(const struct wfn_fetch *f)
+{
+    return f->framing == FR_LENGTH && f->left && !f->discard;
+}
+
 /* The stream's answer is all in. */
 static void stream_end(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
 {
     f->end_recv = 1;
+    if (short_body(f)) {
+        wfn_fail(w, f, WFN_E_CLOSED, "the stream ended before its Content-Length");
+        return;
+    }
     wfn_h2_detach(w, c, f, !f->end_sent);
     wfn_body_end(w, f);
 }
@@ -394,10 +400,13 @@ static int headers_done(struct wfn *w, struct wfn_conn *c, wu32 sid, int end_str
                     cl = cl * 10 + (v[i] - '0');
                 f->length = (unsigned long)cl;
                 f->hflags |= WFN_H_LENGTH;
+                if (vl && i == vl)                  /* the DATA is checked against it */
+                    f->framing = FR_LENGTH, f->left = f->length;
             }
             if (status == 204 || status == 304 || wfn_ieq(f->method, strlen(f->method), "HEAD")) {
                 f->hflags |= WFN_H_NOBODY;
                 f->length = 0;
+                f->framing = FR_NONE;
             }
             at = (unsigned long)wfn_set_head(w, f, status, 20, line, 10, text, (unsigned long)(q - text));
             if ((long)at < 0) {
@@ -447,7 +456,17 @@ static int handle(struct wfn *w, struct wfn_conn *c, unsigned type, unsigned fla
         }
         {
             const unsigned char *d = p + ((flags & FL_PADDED) ? 1 : 0);
-            unsigned long dl = len - pad - ((flags & FL_PADDED) ? 1 : 0), took = wfn_deliver(w, f, d, dl);
+            unsigned long dl = len - pad - ((flags & FL_PADDED) ? 1 : 0), took;
+            if (f->framing == FR_LENGTH && !f->discard) {
+                if (dl > f->left) {
+                    rst(w, c, sid, E_PROTOCOL);
+                    f->end_recv = f->end_sent = 1;
+                    wfn_fail(w, f, WFN_E_PROTOCOL, "more DATA than its Content-Length");
+                    return 1;
+                }
+                f->left -= dl;
+            }
+            took = wfn_deliver(w, f, d, dl);
             if (f->body_done && f->error)
                 return 1;                           /* the decoder failed */
             if (f->dec || f->discard)
@@ -495,7 +514,7 @@ static int handle(struct wfn *w, struct wfn_conn *c, unsigned type, unsigned fla
                 wfn_h2_detach(w, c, f, 0);
                 f->retries++;
                 wfn_requeue(w, f);
-            } else if (code == E_NO_ERROR && f->head_ready) {
+            } else if (code == E_NO_ERROR && f->head_ready && !short_body(f)) {
                 wfn_h2_detach(w, c, f, 0);
                 wfn_body_end(w, f);
             } else

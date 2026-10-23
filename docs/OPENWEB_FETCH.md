@@ -317,7 +317,9 @@ It prints the status line and the headers (the TLS summary too with
 `INFO`), and writes the body to `TO`, or to the console. `HEADER` takes
 one or more `"Name: value"` strings. `HEAD` asks for the head only, `FROM`
 sends a file as the body (POST unless `METHOD` says otherwise), `RAW` keeps
-the body as the server sent it, `QUIET` prints nothing but errors, and
+the body as the server sent it (natively, with no decoder there yet, the
+body is asked for with `Accept-Encoding: identity` unless a `HEADER` names
+one), `QUIET` prints nothing but errors, and
 `NATIVE` uses this Amiga's own TCP/IP and OpenTLS even with a card there
 (`INFO` says which is used). Ctrl-C cancels. It returns 0 for an answer below 400, 5 for 400 and above,
 10 when the fetch failed (DNS, TLS, ...), and 20 when it could not start.
@@ -361,7 +363,8 @@ Kept connections as above: 6 for one place, 32 idle in all, 30 s idle
 (less when the server's `Keep-Alive: timeout=` says so), checked before
 use; a kept connection that fails before the answer begins sends the
 request again on a new one (twice at most), when it has no body or the
-whole body came with OPEN. Bodies framed by `Content-Length`, chunked
+whole body came with OPEN, and the method is one that may be repeated
+(GET, HEAD, OPTIONS, TRACE, PUT, DELETE). Bodies framed by `Content-Length`, chunked
 (extensions and trailers taken and dropped) or by the connection's end;
 uploads with a length or chunked. `100 Continue` and other 1xx are
 skipped. Redirects are left to the caller, as before.
@@ -387,6 +390,9 @@ wait for it, so a page's fetches share one connection.
   connection (when they can be sent again), the rest end with error 7;
   RST_STREAM ends that stream (error 7), REFUSED_STREAM sends it again;
   CANCEL and CLOSE send RST_STREAM CANCEL and the connection stays.
+- A `content-length` is checked against the DATA: a stream that ends short
+  fails with error 7, one that sends more fails with error 5. A connection
+  that fails sends its streams again only for the methods HTTP/1.1 would.
 - Trailers are read and dropped. `http://` is never HTTP/2 (no h2c), and
   WebSocket is always HTTP/1.1.
 

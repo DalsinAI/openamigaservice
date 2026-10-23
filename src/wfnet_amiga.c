@@ -46,6 +46,9 @@ extern struct DosLibrary *DOSBase;
 #define B_EWOULDBLOCK 35
 #define B_EINPROGRESS 36
 
+#define PENDING 8               /* connections under way that have other addresses to try */
+#define ADDRS   4               /* and how many of those each keeps */
+
 struct wfna {
     struct Library *socketbase;
     struct Library *tlsbase;
@@ -54,6 +57,11 @@ struct wfna {
     ULONG got;                  /* which of them came */
     ULONG seed;
     struct wfn *w;
+    struct {
+        LONG sock;
+        UWORD port, left;       /* left: addresses still to try, the last first; 0, a free entry */
+        ULONG addr[ADDRS];
+    } pend[PENDING];
 };
 
 struct tls {
@@ -81,31 +89,63 @@ static unsigned long a_now(void *env)
     return ((unsigned long)d.ds_Days * 1440UL + (unsigned long)d.ds_Minute) * 60000UL + (unsigned long)d.ds_Tick * 20UL;
 }
 
-static long a_connect(void *env, const char *host, unsigned port, int *error)
+/* A non-blocking connection to addr (network order) under way: the socket, or -1. */
+static LONG a_start(struct wfna *e, ULONG addr, unsigned port)
 {
-    struct wfna *e = env;
     struct sockaddr_in sa;
-    struct hostent *he;
     LONG s, on = 1;
     memset(&sa, 0, sizeof sa);
     sa.sin_len = sizeof sa;
     sa.sin_family = AF_INET;
     sa.sin_port = htons((UWORD)port);
-    if (!(he = gethostbyname(host)) || he->h_addrtype != AF_INET) {
-        *error = WFN_E_DNS;
+    sa.sin_addr.s_addr = addr;
+    if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0)
         return -1;
-    }
-    memcpy(&sa.sin_addr, he->h_addr_list[0], 4);
-    if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        *error = WFN_E_CONNECT;
-        return -1;
-    }
     IoctlSocket(s, FIONBIO, (APTR)&on);
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
     if (connect(s, (struct sockaddr *)&sa, sizeof sa) < 0 && Errno() != B_EINPROGRESS) {
         CloseSocket(s);
+        return -1;
+    }
+    return s;
+}
+
+static void a_forget(struct wfna *e, long sock)
+{
+    int i;
+    for (i = 0; i < PENDING; i++)
+        if (e->pend[i].left && e->pend[i].sock == sock)
+            e->pend[i].left = 0;
+}
+
+static long a_connect(void *env, const char *host, unsigned port, int *error)
+{
+    struct wfna *e = env;
+    struct hostent *he;
+    ULONG addr;
+    LONG s = -1;
+    int i = 0, j, k, n;
+    if (!(he = gethostbyname(host)) || he->h_addrtype != AF_INET || !he->h_addr_list[0]) {
+        *error = WFN_E_DNS;
+        return -1;
+    }
+    while (s < 0 && he->h_addr_list[i]) {
+        memcpy(&addr, he->h_addr_list[i++], 4);
+        s = a_start(e, addr, port);
+    }
+    if (s < 0) {
         *error = WFN_E_CONNECT;
         return -1;
+    }
+    /* the rest, for when this one fails on the way (a_connected) */
+    for (n = 0; n < ADDRS && he->h_addr_list[i + n]; n++)
+        ;
+    for (k = 0; n && k < PENDING && e->pend[k].left; k++)
+        ;
+    if (n && k < PENDING) {
+        e->pend[k].sock = s, e->pend[k].port = (UWORD)port, e->pend[k].left = (UWORD)n;
+        for (j = 0; j < n; j++)
+            memcpy(&e->pend[k].addr[n - 1 - j], he->h_addr_list[i + j], 4);
     }
     return s;
 }
@@ -115,15 +155,29 @@ static int a_connected(void *env, long sock)
     struct wfna *e = env;
     struct timeval tv;
     fd_set wf;
-    LONG err = 0;
+    LONG err = 0, s;
     socklen_t len = sizeof err;
+    int i;
     tv.tv_sec = tv.tv_usec = 0;
     FD_ZERO(&wf);
     FD_SET(sock, &wf);
     if (WaitSelect(sock + 1, NULL, &wf, NULL, &tv, NULL) <= 0)
         return WFN_AGAIN_W;
-    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err)
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &err, &len) < 0 || err) {
+        /* the next address, on the same socket number */
+        for (i = 0; i < PENDING; i++)
+            while (e->pend[i].left && e->pend[i].sock == sock) {
+                if ((s = a_start(e, e->pend[i].addr[--e->pend[i].left], e->pend[i].port)) < 0)
+                    continue;
+                if (Dup2Socket(s, sock) >= 0) {
+                    CloseSocket(s);
+                    return WFN_AGAIN_W;
+                }
+                CloseSocket(s);
+            }
         return WFN_E_CONNECT;
+    }
+    a_forget(e, sock);
     return 0;
 }
 
@@ -148,6 +202,7 @@ static long a_recv(void *env, long sock, void *p, unsigned long n)
 static void a_close(void *env, long sock)
 {
     struct wfna *e = env;
+    a_forget(e, sock);
     CloseSocket(sock);
 }
 

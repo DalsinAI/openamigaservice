@@ -302,6 +302,16 @@ int wfn_resendable(const struct wfn_fetch *f)
     return !(f->flags & WFN_F_BODY) || f->keep_body;
 }
 
+/* Whether a fetch may go again after the connection failed with no answer: never sent, or a method safe to repeat. */
+static int retry_safe(const struct wfn_fetch *f)
+{
+    const char *m = f->method;
+    if (!wfn_resendable(f))
+        return 0;
+    return !f->sent_request || !strcmp(m, "GET") || !strcmp(m, "HEAD") || !strcmp(m, "OPTIONS") || !strcmp(m, "TRACE")
+        || !strcmp(m, "PUT") || !strcmp(m, "DELETE");
+}
+
 /* ---- connections ------------------------------------------------------- */
 
 int wfn_out(struct wfn *w, struct wfn_conn *c, const void *p, unsigned long n)
@@ -474,7 +484,7 @@ void wfn_conn_fail(struct wfn *w, struct wfn_conn *c, unsigned long error, const
                 f->error = error;
             continue;
         }
-        if (!f->got_bytes && (c->reused || c->h2) && f->retries < MAX_RETRIES && wfn_resendable(f)
+        if (!f->got_bytes && (c->reused || c->h2) && f->retries < MAX_RETRIES && retry_safe(f)
             && f->state != F_DONE) {
             f->retries++;
             wfn_requeue(w, f);
@@ -593,11 +603,13 @@ static unsigned long random_hex(struct wfn *w, char *out, unsigned n)
     return 2 * n;
 }
 
+static void authority(const struct wfn_fetch *f, char *out, int always_port);
+
 /* An answer to 401 or 407: the Authorization value, or NULL. */
 static char *answer(struct wfn *w, struct wfn_fetch *f, const char *lines, unsigned long len, int proxy)
 {
-    char all[2048], cnonce[33], uri[WFN_HOST_ROOM + 8], *out;
-    const char *from = NULL, *v;
+    char all[2048], cnonce[33], uri[WFN_HOST_ROOM + 16], *out, *full = NULL;
+    const char *from = NULL, *v, *target = f->target;
     unsigned long vl, at = 0, n;
     while ((v = wfn_hdr(lines, len, proxy ? "Proxy-Authenticate" : "WWW-Authenticate", &vl, &from)) != NULL) {
         if (at + vl + 2 >= sizeof all)
@@ -615,14 +627,27 @@ static char *answer(struct wfn *w, struct wfn_fetch *f, const char *lines, unsig
         cpy(uri, sizeof uri - 7, f->host, n);
         uri[n] = ':';
         num(uri + n + 1, f->port, 10);
-    } else
-        cpy(uri, sizeof uri, f->target, strlen(f->target));
+        target = uri;
+    } else if (proxy && f->forward) {
+        /* the proxy sees the absolute form, as the request line has it */
+        authority(f, uri, 0);
+        n = (unsigned long)strlen(uri);
+        if (!(full = zalloc(w, 8 + n + strlen(f->target)))) {
+            zfree(w, out);
+            return NULL;
+        }
+        memcpy(full, "http://", 7);
+        memcpy(full + 7, uri, n);
+        strcpy(full + 7 + n, f->target);
+        target = full;
+    }
     if (!wfn_auth_answer(all, at, proxy ? f->puser : f->user, proxy ? f->ppass : f->pass,
-                         f->connect_phase ? "CONNECT" : f->method, f->connect_phase ? uri : f->target, 1, cnonce, out,
-                         1024)) {
+                         f->connect_phase ? "CONNECT" : f->method, target, 1, cnonce, out, 1024)) {
+        zfree(w, full);
         zfree(w, out);
         return NULL;
     }
+    zfree(w, full);
     return out;
 }
 
@@ -1290,7 +1315,7 @@ static int h1_step(struct wfn *w, struct wfn_conn *c, struct wfn_fetch *f)
             if (b)
                 return 1;
         } else if (eof && f->conn == c && f->state != F_WS) {
-            if (!f->got_bytes && c->reused && f->retries < MAX_RETRIES && wfn_resendable(f)) {
+            if (!f->got_bytes && c->reused && f->retries < MAX_RETRIES && retry_safe(f)) {
                 conn_kill(w, c);
                 f->retries++;
                 wfn_requeue(w, f);

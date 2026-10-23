@@ -31,9 +31,15 @@
 
 #include "openweb/wfnet.h"
 
+#define PENDING 64
+
 struct env {
     SSL_CTX *ctx;
     int decoders;
+    struct {                        /* connections under way, with the addresses still to try */
+        int fd;
+        struct addrinfo *res, *next;
+    } pend[PENDING];
 };
 
 struct tls {
@@ -61,31 +67,92 @@ static unsigned long p_now(void *env)
     return (unsigned long)t.tv_sec * 1000UL + (unsigned long)t.tv_nsec / 1000000UL;
 }
 
-static long p_connect(void *env, const char *host, unsigned port, int *error)
+/* The name's addresses; for the tests, WFNP_HOSTS="name a1 a2..." gives those, in that order. */
+static struct addrinfo *resolve(const char *host, const char *ps, const struct addrinfo *hints)
 {
-    struct addrinfo hints, *res, *ai;
-    char ps[8];
-    int fd = -1, one = 1;
-    (void)env;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    snprintf(ps, sizeof ps, "%u", port);
-    if (getaddrinfo(host, ps, &hints, &res)) {
-        *error = WFN_E_DNS;
-        return -1;
+    const char *t = getenv("WFNP_HOSTS");
+    struct addrinfo *res = NULL, **tail = &res, *one;
+    size_t n = strlen(host), k;
+    char a[64];
+    if (!t || strncmp(t, host, n) || t[n] != ' ')
+        return getaddrinfo(host, ps, hints, &res) ? NULL : res;
+    for (t += n; *t; t += k) {
+        t += strspn(t, " ");
+        k = strcspn(t, " ");
+        if (k && k < sizeof a) {
+            memcpy(a, t, k);
+            a[k] = 0;
+            if (!getaddrinfo(a, ps, hints, &one))
+                for (*tail = one; *tail; tail = &(*tail)->ai_next)
+                    ;
+        }
     }
-    for (ai = res; ai; ai = ai->ai_next) {
+    return res;
+}
+
+/* Starts a connection to the first address from *at that takes one: the socket, or -1. *at moves past it. */
+static int start(struct addrinfo **at)
+{
+    struct addrinfo *ai;
+    int fd, one = 1;
+    while ((ai = *at) != NULL) {
+        *at = ai->ai_next;
         fd = socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, ai->ai_protocol);
         if (fd < 0)
             continue;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         if (!connect(fd, ai->ai_addr, ai->ai_addrlen) || errno == EINPROGRESS)
-            break;
+            return fd;
         close(fd);
-        fd = -1;
     }
-    freeaddrinfo(res);
+    return -1;
+}
+
+static int pending(struct env *e, long sock)
+{
+    int i;
+    for (i = 0; i < PENDING; i++)
+        if (e->pend[i].res && e->pend[i].fd == sock)
+            return i;
+    return -1;
+}
+
+static void forget(struct env *e, long sock)
+{
+    int i = pending(e, sock);
+    if (i >= 0) {
+        freeaddrinfo(e->pend[i].res);
+        e->pend[i].res = NULL;
+    }
+}
+
+static long p_connect(void *env, const char *host, unsigned port, int *error)
+{
+    struct env *e = env;
+    struct addrinfo hints, *res, *next;
+    char ps[8];
+    int fd, i;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(ps, sizeof ps, "%u", port);
+    if (!(res = resolve(host, ps, &hints))) {
+        *error = WFN_E_DNS;
+        return -1;
+    }
+    next = res;
+    fd = start(&next);
+    /* the rest, for when this one fails on the way (p_connected) */
+    if (fd >= 0 && next) {
+        for (i = 0; i < PENDING && e->pend[i].res; i++)
+            ;
+        if (i < PENDING) {
+            e->pend[i].fd = fd, e->pend[i].res = res, e->pend[i].next = next;
+            res = NULL;
+        }
+    }
+    if (res)
+        freeaddrinfo(res);
     if (fd < 0)
         *error = WFN_E_CONNECT;
     return fd;
@@ -93,15 +160,27 @@ static long p_connect(void *env, const char *host, unsigned port, int *error)
 
 static int p_connected(void *env, long sock)
 {
+    struct env *e = env;
     struct pollfd p;
-    int err = 0;
+    int err = 0, i, fd;
     socklen_t len = sizeof err;
-    (void)env;
     p.fd = (int)sock, p.events = POLLOUT, p.revents = 0;
     if (poll(&p, 1, 0) <= 0)
         return WFN_AGAIN_W;
-    if (getsockopt((int)sock, SOL_SOCKET, SO_ERROR, &err, &len) || err)
+    if (getsockopt((int)sock, SOL_SOCKET, SO_ERROR, &err, &len) || err) {
+        /* the next address, on the same socket number */
+        if ((i = pending(e, sock)) >= 0)
+            while ((fd = start(&e->pend[i].next)) >= 0) {
+                if (dup3(fd, (int)sock, O_CLOEXEC) >= 0) {
+                    close(fd);
+                    return WFN_AGAIN_W;
+                }
+                close(fd);
+            }
+        forget(e, sock);
         return WFN_E_CONNECT;
+    }
+    forget(e, sock);
     return 0;
 }
 
@@ -125,7 +204,7 @@ static long p_recv(void *env, long sock, void *p, unsigned long n)
 
 static void p_close(void *env, long sock)
 {
-    (void)env;
+    forget(env, sock);
     close((int)sock);
 }
 
