@@ -1,7 +1,8 @@
-# openweb.fetch/1
+# openweb.fetch/1 (protocol v2)
 
 HTTP and HTTPS fetches for an Amiga: the network and TLS run on the x86 or
-ARM64 cores, and the Amiga gets the status, the headers and the body. It is
+ARM64 cores, or on the Amiga itself (the native transport, below), and the
+Amiga gets the status, the headers and the body. It is
 the first bridge service for the browser (AmigaChrome's
 `MAGIC_FUNCTIONS_AND_BRIDGE.md`, section 12), and any other program may use
 it. Host code: `host/openweb_fetch.c`, built into `host/libopenwebfetch.so`
@@ -10,7 +11,11 @@ OpenSSL 3, zlib and libbrotlidec. On the Amiga: the client
 `src/webfetch.c` (`include/openweb/webfetch.h`) and the `OWFetch` command
 (`src/owfetch.c`).
 
-Status: v1, 12 October 2026. Offered on the services card. Not yet on the
+Status: v2, 23 October 2026: the native transport on the Amiga's own
+TCP/IP and OpenTLS, with HTTP/2, WebSocket (ops 8 to 10), proxies and HTTP
+auth; asynchronous use from one task (`wf_async_start`, `wf_wait`). The
+service's name stays `openweb.fetch/1`: v1's messages are unchanged, and
+v2 only adds ops, flags and info lines. Before that, v1, 12 October 2026. Offered on the services card. Not yet on the
 LAN (below). Later the same day: a waiting HEAD or READ is answered later
 from the library's own threads instead of holding a card worker
 (`wf_start`, below), and connections are kept per host (below). The
@@ -42,7 +47,13 @@ so any number can wait at once.
 | 4 | READ | `arg` the handle; buf0 (out) room for body bytes; `extra[0]` the wait in ms | result the bytes written; aux 0 more to come, 1 the end; on a failure, 1 with the error in bits 8-15 |
 | 5 | CANCEL | `arg` the handle | 0. The fetch stops now: its connection is shut, and a HEAD or READ waiting on it answers with error 6 |
 | 6 | CLOSE | `arg` the handle | 0. Cancels it if it still runs; the handle is gone |
-| 7 | STATS | | result the fetches open, aux their threads still running |
+| 7 | STATS | | result the fetches open, aux their threads still running (native: connections open) |
+| 8 | WS_OPEN | as OPEN, with a `ws://` or `wss://` URL and no body | result the handle; HEAD then gives the 101, or the answer that refused it |
+| 9 | WS_SEND | `arg` the handle; buf0 the payload; `extra[0]` the opcode (1 text, 2 binary, 8 close, 9 ping, 10 pong), bit 7 more parts of this message follow; `extra[1]` the wait in ms | result the bytes taken: all, or 0 when the queue is full (send it again); aux 1 with the error in bits 8-15 when the connection has ended |
+| 10 | WS_RECV | `arg` the handle; buf0 (out) room for payload; `extra[0]` the wait in ms | result the bytes written; aux the opcode (bits 0-3), bit 4 the message ends with these bytes, bit 5 the connection has ended (the error in bits 8-15), and for a close its code in bits 16-31. Result 0 and aux 0: nothing yet |
+
+The services card answers -2 to ops 8 to 10 until its host library has
+them (left for later); the native transport has them all.
 
 OPEN flags (`extra[0]`):
 
@@ -53,7 +64,11 @@ OPEN flags (`extra[0]`):
   (`br`, Brotli, when the library was built with libbrotlidec, as
   `build.sh` does when its headers are there; otherwise `gzip, deflate`).
   It drops `Content-Encoding` and the sender's `Content-Length`; HEAD gives
-  the length after decoding only when the whole body is in by then.
+  the length after decoding only when the whole body is in by then. On the
+  native transport see "Compressed bodies" below.
+- bit 2 `WF_NOPROXY` (native): never through a proxy, whatever the
+  environment says.
+- bit 3 `WF_HTTP1` (native): offer only `http/1.1` by ALPN, so never HTTP/2.
 
 A wait is how long the call may wait for something to happen before it
 answers: 0 answers at once, and more than 2000 is cut to 2000.
@@ -73,9 +88,18 @@ The first line is the method and the absolute URL (`http://` or
 header per line, as it should be sent. The host writes `Host`,
 `Connection` (`keep-alive`), `Content-Length` or `Transfer-Encoding`, and with
 `WF_DECODE` `Accept-Encoding`; the Amiga's own copies of those are dropped.
-It adds `User-Agent: OpenWeb-Fetch/1` when there is none. Everything else
+It adds `User-Agent: OpenWeb-Fetch/1` (native: `OpenWeb-Fetch/2`) when there is none. Everything else
 goes as it is: the Amiga keeps its own cookie jar and sends `Cookie`
 itself.
+
+On the native transport, two more things in the request text:
+
+- Credentials for HTTP auth go in the URL, `https://user:password@host/`
+  (percent-encoded as needed). They are sent only to answer a 401 (below).
+- A line `:proxy URL` (`http://[user:password@]host[:port]`, port 1080 when
+  none is given, as curl has it; `:proxy none` for none) names the proxy
+  for this fetch, in place of the environment's. Lines starting with `:`
+  are never sent.
 
 ### The head
 
@@ -90,7 +114,7 @@ A 32-byte block of big-endian u32s, then two texts:
 | +16 | the body's length, when bit 3 |
 | +20 | the bytes of header text that follow |
 | +24 | the bytes of info text after the header text |
-| +28 | the HTTP version times ten (10 or 11) |
+| +28 | the HTTP version times ten (10, 11, or 20 for HTTP/2) |
 
 The header text is the status line, then each header as the server sent it
 (`Name: value`), each line ending in LF, in order, repeats kept: every
@@ -112,6 +136,12 @@ verified=yes
 A fetch that went on a kept connection (below) ends its info text with
 `reused=yes`; over HTTPS the lines before it are those of the connection's
 own handshake.
+
+The native transport's info text starts with `transport=native`, and adds
+`alpn=h2` for HTTP/2, `proxy=host:port` through a proxy, `auth=server`,
+`auth=proxy` or `auth=both` when a challenge was answered, and
+`decode=datatypes` (below). Over HTTP/2 the status line is `HTTP/2 200`
+and header names come as the server sent them, in lower case.
 
 On an error, `error=` says what went wrong, and for a certificate the
 host does not trust, the summary of the certificate the server sent:
@@ -280,22 +310,202 @@ request through openservice.device. `OWFetch` is the command built on it:
 
 ```
 OWFetch URL [TO file] [HEAD] [HEADER "Name: value" ...] [METHOD m] [FROM file]
-        [TIMEOUT s] [RAW] [QUIET] [INFO]
+        [TIMEOUT s] [RAW] [QUIET] [INFO] [NATIVE]
 ```
 
 It prints the status line and the headers (the TLS summary too with
 `INFO`), and writes the body to `TO`, or to the console. `HEADER` takes
 one or more `"Name: value"` strings. `HEAD` asks for the head only, `FROM`
 sends a file as the body (POST unless `METHOD` says otherwise), `RAW` keeps
-the body as the server sent it, `QUIET` prints nothing but errors, and
-Ctrl-C cancels. It returns 0 for an answer below 400, 5 for 400 and above,
+the body as the server sent it (natively, with no decoder there yet, the
+body is asked for with `Accept-Encoding: identity` unless a `HEADER` names
+one), `QUIET` prints nothing but errors, and
+`NATIVE` uses this Amiga's own TCP/IP and OpenTLS even with a card there
+(`INFO` says which is used). Ctrl-C cancels. It returns 0 for an answer below 400, 5 for 400 and above,
 10 when the fetch failed (DNS, TLS, ...), and 20 when it could not start.
+
+## The native transport
+
+When no services card or paired Cradle offers `openweb.fetch/1` (or the
+program asks with `wf_service_open_mode(s, WF_MODE_NATIVE)`, or
+`ENV:OpenWeb/Fetch` is `native`, or `OWFetch ... NATIVE`), `src/webfetch.c`
+answers every call itself: the same ops, buffers, heads and errors, over
+the Amiga's own bsdsocket.library (any stack) and opentls.library. Its
+`where` is `WF_WHERE_NATIVE`. No curl, nghttp2 or libpsl: the protocol code
+is our own, written from the RFCs.
+
+- `src/wfnet.c`: fetches and connections, HTTP/1.1, proxies, auth,
+  WebSocket; `src/wfnet_h2.c`: HTTP/2 (RFC 9113); `src/wfnet_hpack.c`:
+  HPACK (RFC 7541) with the static table, a dynamic table each way and the
+  Huffman code; `src/wfnet_auth.c`: MD5, SHA-1, SHA-256, base64, the
+  WebSocket accept key and the Basic and Digest answers.
+- Portable C99 with no writable globals and nothing of the C library but
+  `<string.h>`: the machine is a table of calls, `struct wfn_io`
+  (`include/openweb/wfnet.h`): connect, send, receive, close, wait, TLS
+  over a socket, time, memory, random bytes, the environment, and the
+  decoders. `src/wfnet_amiga.c` fills it with bsdsocket.library and
+  opentls.library (their bases in a struct of their own, never in
+  globals); `host/wfnet_posix.c` with POSIX sockets and OpenSSL, for the
+  tests on Linux.
+- Integers only. 68k code (the 68040, GCC 16.2, `-Os`): the protocol code
+  about 34.7 KB (`wfnet.c` 18.9, `wfnet_h2.c` 6.0, `wfnet_auth.c` 5.6,
+  `wfnet_hpack.c` 4.2), the Amiga side 2.8 KB, `webfetch.c` 3.7 KB; no
+  data or bss.
+- Memory: each fetch has its window (64 KB) and about 2 KB; each
+  connection about 18 KB, and OpenTLS's 33 KB with TLS. An HTTP/2 header
+  block is decoded into 64 KB that is freed straight after.
+- Nothing runs in the background: each call moves every fetch of its
+  `wf_service` on, then waits on all their sockets for at most its wait.
+
+### HTTP/1.1
+
+Kept connections as above: 6 for one place, 32 idle in all, 30 s idle
+(less when the server's `Keep-Alive: timeout=` says so), checked before
+use; a kept connection that fails before the answer begins sends the
+request again on a new one (twice at most), when it has no body or the
+whole body came with OPEN, and the method is one that may be repeated
+(GET, HEAD, OPTIONS, TRACE, PUT, DELETE). Bodies framed by `Content-Length`, chunked
+(extensions and trailers taken and dropped) or by the connection's end;
+uploads with a length or chunked. `100 Continue` and other 1xx are
+skipped. Redirects are left to the caller, as before.
+
+### HTTP/2
+
+Over `https://` the transport offers `h2,http/1.1` by ALPN
+(`OT_SetALPN`, and `OT_GetALPN` for the answer); when the server takes
+`h2`, the connection is HTTP/2 and every fetch to the same place is a
+stream on it, up to the server's `SETTINGS_MAX_CONCURRENT_STREAMS`. While
+the first connection's handshake runs, other fetches to the same place
+wait for it, so a page's fetches share one connection.
+
+- SETTINGS: push off, each stream's window the fetch's window; the
+  connection's window 16 times that, given back as data comes. A stream's
+  window is given back as the program reads, so the server never sends a
+  fetch more than it can hold. Our DATA keeps to the server's windows.
+- Our headers are HPACK literals never indexed (the static table's names,
+  Huffman where shorter); the server's are decoded with a 4 KB dynamic
+  table. Connection headers (`Connection`, `Keep-Alive`, `Upgrade`,
+  `Transfer-Encoding`, `Host`) are not sent; `:authority` is the host.
+- PING answered; GOAWAY: streams the server did not take go again on a new
+  connection (when they can be sent again), the rest end with error 7;
+  RST_STREAM ends that stream (error 7), REFUSED_STREAM sends it again;
+  CANCEL and CLOSE send RST_STREAM CANCEL and the connection stays.
+- A `content-length` is checked against the DATA: a stream that ends short
+  fails with error 7, one that sends more fails with error 5. A connection
+  that fails sends its streams again only for the methods HTTP/1.1 would.
+- Trailers are read and dropped. `http://` is never HTTP/2 (no h2c), and
+  WebSocket is always HTTP/1.1.
+
+### WebSocket
+
+WS_OPEN sends the Upgrade (`Sec-WebSocket-Key` from 16 random bytes,
+version 13) on a connection of its own, and checks `Sec-WebSocket-Accept`
+(SHA-1 and base64): a wrong one is error 5. After the 101, WS_SEND sends
+masked frames (a fresh mask for each), and WS_RECV gives messages in the
+order they came, in parts as large as the room given (bit 4 on the last).
+A message larger than the window comes in parts too. Pings are answered
+with pongs at once (and not shown); pongs are shown. A close from the
+server is shown with its code and answered; after ours, the server's
+answer is shown, and then the end (bit 5, error 0). An end without a close
+is error 7.
+
+### Proxies
+
+From the request's `:proxy` line, else the environment: `http_proxy` (or
+`HTTP_PROXY`, then `all_proxy`) for `http://` and `ws://`, `https_proxy`
+(or `HTTPS_PROXY`, then `all_proxy`) for `https://` and `wss://`, read with
+`GetVar()` (so `ENV:http_proxy`), with `no_proxy` (names and domains by
+commas, a leading dot or not, or `*`). `WF_NOPROXY` turns them off. Only
+HTTP proxies:
+
+- `http://` goes to the proxy in absolute form (`GET http://host/path`),
+  with `Proxy-Authorization` once asked; one kept connection to the proxy
+  serves every host.
+- `https://`, `ws://` and `wss://` go through `CONNECT host:port`, then
+  TLS (and HTTP/2) inside the tunnel, which is kept for that host only.
+- A 407 is answered once when the proxy URL carries credentials;
+  otherwise it comes back as the answer, with its body.
+
+### HTTP auth
+
+With credentials in the URL, a 401 is answered once: with Digest (RFC
+7616: `SHA-256` or `MD5`, with or without `-sess`, `qop=auth`, `userhash`)
+when the server offers it, the strongest first, else Basic; then the
+request goes again (on the same connection when it was kept). Its 401 body
+is read and dropped. A request whose body came in parts with SEND cannot
+be sent again: its 401 comes back. Credentials are never sent before a
+challenge. A second 401 comes back as the answer.
+
+### Compressed bodies
+
+The transport does not decode bodies itself: decoding is the datatypes'
+work (stream.datatype, with gzip.datatype and brotli.datatype). Without
+`WF_DECODE` the body comes as the server sent it, `Content-Encoding` kept.
+With `WF_DECODE`, the transport asks for `gzip, deflate, br` and hands the
+coded body to `struct wfn_io`'s decoder (`dec_new`, `dec_run`, `dec_free`),
+which is where the datatypes' stream classes plug in; the head then drops
+`Content-Encoding` and `Content-Length` and sets bit 2, as the card does.
+Until those are there, `dec_new` is empty on the Amiga: the body comes as
+the server sent it, `Content-Encoding` kept, bit 2 clear, and the info
+text says `decode=datatypes`, for the program to decode it through
+datatypes itself. The tests plug zlib in to check the hook.
+
+### TLS through OpenTLS
+
+opentls.library 1.x: TLS 1.2 and 1.3, the certificate checked against
+OpenTLS's trust store and the host's name (`OTV_FULL`), so every
+handshake that succeeds sets bit 1. The info text gives `tls=`, `cipher=`,
+`verified=yes` and `subject=` (OpenTLS's `OT_GetPeerName`); on a failure
+`error=` with `OT_GetErrorText`. ALPN is OpenTLS's (`OT_SetALPN`,
+`OT_GetALPN`), so nothing was missing for HTTP/2. What OpenTLS could still
+give: SHA-1 and MD5 through opencrypto.library (wfnet carries its own,
+5.6 KB with SHA-256 and the auth code, used for a few hashes per request),
+the issuer and expiry of the server's certificate for the info text, and
+saying whether a non-blocking `OT_Handshake` waits to read or to write
+(wfnet waits to read).
+
+## One task, many fetches
+
+A program such as the browser's network backend runs all its fetches from
+one task, and must never block on one (include/openweb/webfetch.h):
+
+```
+wf_open(&s, ..., &f1); wf_open(&s, ..., &f2);         start them (each answers at once)
+wf_async_start(&s, &a1, WF_OP_HEAD, f1, buf1, room, 2000);
+wf_async_start(&s, &a2, WF_OP_READ, f2, buf2, room, 2000);
+for (;;) {
+    got = wf_wait(&s, 100, windowSignals);            sleeps on the network and the task's own signals
+    if (wf_async_check(&a1)) ...                      a1.status, a1.result, a1.aux, as wf_head/wf_read answer
+    if (wf_async_check(&a2)) ...                      then start the next one
+}
+```
+
+- On the card (or a Cradle), `wf_async_start` sends the call with
+  `SendIO()` on a request of its own that replies to the service's port;
+  the card holds it until it has something (`wf_start`, above) or its wait
+  runs out, so nothing on the Amiga waits. `wf_wait` waits on that port's
+  signal and the program's own; `wf_async_check` is `CheckIO()`, and
+  `wf_async_abort` is `AbortIO()`.
+- On the native transport, `wf_async_start` asks once with a wait of 0,
+  `wf_wait` moves every fetch on and waits on all their sockets with
+  `WaitSelect()`, its timeout and the program's signals, and
+  `wf_async_check` asks again with a wait of 0.
+- Plain calls with a wait of 0 never block either (the names are the one
+  exception: `gethostbyname()` blocks while it resolves, on the native
+  transport). OPEN, SEND, CANCEL and CLOSE answer at once.
+- The only synchronous parts left are the plain calls, which are
+  `DoIO()` on the card and wait at most their wait.
 
 ## Left for later
 
-- **HTTP/2 sessions** with their streams, the step after kept connections
-  for page loads: the handles and ops stay as they are. TLS session
-  resumption for new connections to a host already seen is smaller.
+- **The WebSocket ops and the `:proxy` line on the card's host library**,
+  and HTTP/2 there: the native transport has them, the card answers -2.
+- **TLS session resumption** for new connections to a host already seen
+  (OpenTLS has `OT_GetSession`); HTTPS proxies and SOCKS; IPv6 in the
+  Amiga side (bsdsocket's `gethostbyname` is IPv4); the name resolved
+  without blocking.
+- **The datatypes' decoders** in the native transport's hook, once
+  stream.datatype, gzip.datatype and brotli.datatype are there.
 - **SEND answered later** too, when the upload queue is full, as HEAD and
   READ are now.
 - **The LAN transport for real Amigas.** The device already carries the
@@ -305,7 +515,7 @@ Ctrl-C cancels. It returns 0 for an answer below 400, 5 for 400 and above,
   opened it (today a service open on several Cradles spreads calls to the
   least busy one, which suits stateless services only). A long wait also
   holds the Cradle's connection, so the LAN path wants short waits.
-- **Proxies, client certificates, and a trust store of the Amiga's own.**
+- **Client certificates.**
 - **The PiStorm back end** (below).
 
 ### The PiStorm back end (design only)
@@ -354,6 +564,28 @@ new one), one that closes it in the middle of an answer (error 7, not sent
 again), and a page of 50 small fetches over HTTP and HTTPS with and
 without `OPENWEB_FETCH_KEEP=0`. The test passes with the library built
 with AddressSanitizer and UBSan, and with ThreadSanitizer.
+
+`host/test_wfnet.py` runs the native transport's own code, built for
+Linux as `host/libwfnet.so` (POSIX sockets, and OpenSSL and zlib in place
+of OpenTLS and the datatypes), against servers it starts on 127.0.0.1:
+first the pieces against their published examples (RFC 7541 Appendix C
+C.2 to C.6, decoded and encoded byte for byte, with and without Huffman
+and with eviction; Huffman round trips; MD5, SHA-1 and SHA-256 against
+hashlib and RFC 1321 and FIPS 180; base64 from RFC 4648; the accept key
+from RFC 6455 1.3; Digest from RFC 7616 3.9.1, MD5 and SHA-256); then
+HTTP/1.1 (kept connections, chunked, close-delimited, 3 MB, 10 at once,
+uploads with a length and chunked, DNS, refused, timeout, cancel,
+Content-Encoding kept and through the hook, one task's 8 fetches with
+waits of 0 and `wfn_pump`); HTTPS; HTTP/2 against a server written in the
+test by hand (frames, SETTINGS, flow control both ways, HPACK both ways,
+12 streams at once on one connection, 3 MB through a 64 KB window, uploads,
+RST_STREAM, cancel, GOAWAY with the untaken streams sent again, HTTP/1.1
+by flag) and, when Go is there, against Go's net/http HTTP/2 server;
+WebSocket echo (ping and pong both ways, parts, large messages, close from
+either side, a wrong accept key); a proxy (absolute form, CONNECT for
+HTTPS, HTTP/2 and WebSocket, the environment and `no_proxy`, a 407 with
+Basic); Basic and Digest auth (MD5, SHA-256, a POST sent again). It
+passes with AddressSanitizer and UBSan too, with no leaks of its own.
 
 Measured on 12 October 2026 with `OWFetch` on a scratch copy of an OS 3.2.3
 instance (AC090, the card's runtime built with this service): 20 fetches of
