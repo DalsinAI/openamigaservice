@@ -27,7 +27,14 @@ done
 # the os32 stove's GCC 6.5 and libnix.
 #   OS32  the stove holding prefix/ (default ~/AmigaChrome/stoves/os32)
 CC65=${OS32:-"$HOME/AmigaChrome/stoves/os32"}/prefix/bin/m68k-amigaos-gcc
-"$CC65" $SOFT -noixemul -Os -fno-delete-null-pointer-checks -Wall -Werror -Iinclude -o bin/OWFetch src/owfetch.c src/webfetch.c
+# The native transport (src/wfnet*.c: HTTP/1.1, HTTP/2, WebSocket, proxies,
+# auth) comes with it, over bsdsocket.library and opentls.library, whose
+# headers are OpenTLS's.
+#   OPENTLS  the openamigatls checkout (default: beside this one)
+OPENTLS=${OPENTLS:-"$HERE/../openamigatls"}
+WFNET="src/wfnet.c src/wfnet_h2.c src/wfnet_hpack.c src/wfnet_auth.c src/wfnet_amiga.c"
+"$CC65" $SOFT -noixemul -Os -fno-delete-null-pointer-checks -Wall -Werror -Iinclude -Isrc -I"$OPENTLS/include" \
+    -o bin/OWFetch src/owfetch.c src/webfetch.c $WFNET
 # The host side (Linux, OpenSSL 3), for the LAN Cradle and the emulator.
 if [ -f /usr/include/openssl/evp.h ]; then
     gcc -O2 -Wall -fPIC -shared -o host/libopentlskey.so host/opentls_key.c -lcrypto
@@ -45,6 +52,12 @@ if pkg-config --exists libavif libheif 2>/dev/null; then
 fi
 # doc.render/1: needs LibreOffice and poppler's tools at run time only.
 gcc -O2 -Wall -fPIC -shared -o host/libdocrender.so host/doc_render.c host/hostrun.c -lpthread -ldl
+# The native transport's own code on Linux, for host/test_wfnet.py: POSIX
+# sockets, and OpenSSL and zlib standing in for OpenTLS and the datatypes.
+if [ -f /usr/include/openssl/ssl.h ] && [ -f /usr/include/zlib.h ]; then
+    gcc -std=c99 -O2 -Wall -Wextra -Werror -fPIC -shared -Iinclude -Isrc -o host/libwfnet.so host/wfnet_posix.c \
+        src/wfnet.c src/wfnet_h2.c src/wfnet_hpack.c src/wfnet_auth.c -lssl -lcrypto -lz
+fi
 # openweb.fetch/1: OpenSSL 3's TLS and zlib; Brotli too when its decoder's headers are there.
 if [ -f /usr/include/openssl/ssl.h ] && [ -f /usr/include/zlib.h ]; then
     if [ -f /usr/include/brotli/decode.h ]; then

@@ -1,11 +1,13 @@
 /*
- * OWFetch: fetches a URL through openweb.fetch/1 (docs/OPENWEB_FETCH.md),
- * on the services card or a paired Cradle: the network and TLS run on the
- * x86 or ARM64 cores. Prints the status line and the headers, then writes
- * the body to TO, or to the console.
+ * OWFetch: fetches a URL through openweb.fetch (docs/OPENWEB_FETCH.md),
+ * on the services card or a paired Cradle (the network and TLS on the x86
+ * or ARM64 cores), or when neither is there, natively over this Amiga's
+ * TCP/IP stack and OpenTLS. Prints the status line and the headers, then
+ * writes the body to TO, or to the console.
  *
  * Usage: OWFetch URL/A TO/K HEAD/S HEADER/M METHOD/K FROM/K TIMEOUT/K/N
- *                RAW/S QUIET/S INFO/S
+ *                RAW/S QUIET/S INFO/S NATIVE/S
+ *   NATIVE: this Amiga's own TCP/IP and OpenTLS, even with a card there.
  *   HEADER: one or more "Name: value", sent as they are (Cookie, Accept...).
  *   HEAD: the head only. FROM: a file sent as the body (POST unless METHOD).
  *   RAW: the body as the server sent it (otherwise gzip is undone).
@@ -25,7 +27,10 @@
 
 #include "openweb/webfetch.h"
 
-const char version[] __attribute__((used)) = "$VER: OWFetch 0.1 (12.10.2026)";
+const char version[] __attribute__((used)) = "$VER: OWFetch 0.2 (23.10.2026)";
+
+/* A TLS handshake wants 16 KB of stack free (opentls.library). */
+unsigned long __stack = 65536;
 
 #define PIECE (256UL << 10)
 #define HEAD_ROOM (72UL << 10)
@@ -70,7 +75,7 @@ static void info_value(const struct wf_head *h, const char *key, char *out, ULON
 
 int main(void)
 {
-    enum { URL, TO, HEAD, HEADER, METHOD, FROM, TIMEOUT, RAW, QUIET, INFO, NARGS };
+    enum { URL, TO, HEAD, HEADER, METHOD, FROM, TIMEOUT, RAW, QUIET, INFO, NATIVE, NARGS };
     LONG args[NARGS];
     struct RDArgs *rd;
     struct wf_service s;
@@ -85,7 +90,7 @@ int main(void)
 
     memset(args, 0, sizeof args);
     memset(&s, 0, sizeof s);
-    if (!(rd = ReadArgs((CONST_STRPTR)"URL/A,TO/K,HEAD/S,HEADER/M,METHOD/K,FROM/K,TIMEOUT/K/N,RAW/S,QUIET/S,INFO/S",
+    if (!(rd = ReadArgs((CONST_STRPTR)"URL/A,TO/K,HEAD/S,HEADER/M,METHOD/K,FROM/K,TIMEOUT/K/N,RAW/S,QUIET/S,INFO/S,NATIVE/S",
                         args, NULL))) {
         PrintFault(IoErr(), (CONST_STRPTR)"OWFetch");
         return RETURN_FAIL;
@@ -120,10 +125,14 @@ int main(void)
         flags |= WF_BODY;
     }
 
-    if ((status = wf_service_open(&s)) != OSERR_OK) {
-        printf("OWFetch: no services card or paired Cradle offers %s (%ld)\n", WF_SERVICE_NAME, (long)status);
+    if ((status = wf_service_open_mode(&s, args[NATIVE] ? WF_MODE_NATIVE : WF_MODE_AUTO)) != OSERR_OK) {
+        printf("OWFetch: no services card or paired Cradle offers %s, and no TCP/IP stack is running (%ld)\n",
+               WF_SERVICE_NAME, (long)status);
         goto done;
     }
+    if (args[INFO])
+        printf("(%s)\n", s.where == WF_WHERE_NATIVE ? "native: this Amiga's TCP/IP and OpenTLS"
+                          : s.where == OSWHERE_LAN ? "a paired Cradle" : "the services card");
     if ((status = wf_open(&s, request, 0, flags, body_length, args[TIMEOUT] ? (ULONG)*(LONG *)args[TIMEOUT] : 0,
                           piece, part, &fetch)) != OSERR_OK) {
         printf("OWFetch: the request was refused (%ld): check the URL and the headers\n", (long)status);
